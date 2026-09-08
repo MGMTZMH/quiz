@@ -1,0 +1,775 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>课堂抢答</title>
+<style>
+:root{
+  --bg:#12141c; --panel:#1c1f2b; --line:#2c3040; --fg:#f2f4f8; --dim:#98a0b3;
+  --a:#e0455a; --b:#2f7de1; --c:#e8a127; --d:#2aa66a; --gold:#f0c04a;
+}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%}
+body{
+  background:var(--bg);color:var(--fg);
+  font-family:"PingFang SC","Microsoft YaHei","Hiragino Sans GB",system-ui,-apple-system,"Segoe UI",sans-serif;
+  overflow-x:hidden;
+}
+.wrap{max-width:1080px;margin:0 auto;padding:20px;min-height:100%;display:flex;flex-direction:column}
+.hide{display:none !important}
+button{font:inherit;color:inherit;border:0;background:none;cursor:pointer}
+h1,h2,h3{margin:0;font-weight:700;line-height:1.25}
+
+/* connection banner */
+#banner{position:fixed;left:0;right:0;top:0;z-index:50;padding:9px 14px;text-align:center;
+  font-size:14px;font-weight:600;transform:translateY(-100%);transition:transform .25s}
+#banner.show{transform:none}
+#banner.warn{background:#c9812a;color:#12141c}
+#banner.bad{background:var(--a);color:#fff}
+#banner.ok{background:var(--d);color:#fff}
+
+/* generic pieces */
+.card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:22px}
+.btn{background:var(--fg);color:#12141c;border-radius:12px;padding:14px 26px;font-weight:700;font-size:17px}
+.btn:active{transform:translateY(1px)}
+.btn.ghost{background:none;border:1px solid var(--line);color:var(--fg)}
+.btn:disabled{opacity:.4;cursor:default}
+.dim{color:var(--dim)}
+.row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.spacer{flex:1}
+
+/* ---------- chooser ---------- */
+#chooser{justify-content:center;align-items:center;gap:18px;text-align:center}
+#chooser .card{max-width:420px;width:100%}
+#joinCode{width:100%;text-align:center;letter-spacing:.35em;font-size:34px;font-weight:800;
+  text-transform:uppercase;background:#0d0f16;border:2px solid var(--line);color:var(--fg);
+  border-radius:12px;padding:14px;margin:14px 0;font-family:ui-monospace,Menlo,Consolas,monospace}
+
+/* ---------- host ---------- */
+#host{gap:18px}
+.hbar{display:flex;align-items:center;gap:16px;padding-bottom:4px}
+.hbar .code{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:26px;font-weight:800;letter-spacing:.18em}
+.lobbyGrid{display:grid;grid-template-columns:300px 1fr;gap:22px;align-items:start}
+@media(max-width:820px){.lobbyGrid{grid-template-columns:1fr}}
+#qrbox{background:#fff;padding:14px;border-radius:14px;display:flex;justify-content:center}
+#qrbox img,#qrbox canvas{display:block;width:100%;height:auto;image-rendering:pixelated}
+.joinUrl{font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px;word-break:break-all;color:var(--dim);margin-top:10px}
+#roster{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px;max-height:44vh;overflow:auto}
+.chip{background:#262b3a;border-radius:999px;padding:7px 14px;font-size:15px;font-weight:600}
+.chip.new{animation:pop .3s}
+@keyframes pop{from{transform:scale(.6);opacity:0}}
+
+.qhead{display:flex;align-items:baseline;gap:14px}
+.qtext{font-size:min(4.4vw,40px);font-weight:700;line-height:1.35;margin:18px 0 22px}
+.opts{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+@media(max-width:700px){.opts{grid-template-columns:1fr}}
+.opt{display:flex;align-items:center;gap:14px;border-radius:14px;padding:20px;font-size:min(3vw,26px);
+  font-weight:700;color:#fff;position:relative;overflow:hidden;transition:opacity .2s}
+.opt .tag{width:34px;height:34px;flex:none;border-radius:8px;background:rgba(255,255,255,.28);
+  display:grid;place-items:center;font-size:19px}
+.opt.o0{background:var(--a)}.opt.o1{background:var(--b)}.opt.o2{background:var(--c)}.opt.o3{background:var(--d)}
+.opt.faded{opacity:.28}
+.opt .bar{position:absolute;left:0;bottom:0;height:5px;background:rgba(255,255,255,.85);width:0;transition:width .5s}
+.opt .cnt{margin-left:auto;font-size:20px;opacity:.9}
+.tick{font-size:28px;margin-left:10px;flex:none}
+
+.timer{display:flex;align-items:center;gap:14px}
+.ring{--p:100;width:74px;height:74px;flex:none;border-radius:50%;display:grid;place-items:center;
+  background:conic-gradient(var(--gold) calc(var(--p)*1%),#2c3040 0);font-size:25px;font-weight:800}
+.ring span{width:56px;height:56px;border-radius:50%;background:var(--bg);display:grid;place-items:center}
+
+table.lb{width:100%;border-collapse:collapse;font-size:20px}
+table.lb td{padding:12px 10px;border-bottom:1px solid var(--line)}
+table.lb td.r{width:56px;color:var(--dim);font-weight:800;text-align:center}
+table.lb td.s{text-align:right;font-weight:800;font-variant-numeric:tabular-nums}
+table.lb tr.me td{background:#243049}
+.medal1 td.r{color:var(--gold)}.medal2 td.r{color:#c6ccd8}.medal3 td.r{color:#c98a52}
+
+.podium{display:flex;justify-content:center;align-items:flex-end;gap:16px;margin:26px 0}
+.pod{width:170px;text-align:center}
+.pod .bar2{border-radius:14px 14px 0 0;background:var(--panel);border:1px solid var(--line);border-bottom:0;
+  display:grid;place-items:center;font-size:44px;font-weight:900;color:var(--gold)}
+.pod .nm{font-weight:700;font-size:19px;margin-bottom:8px;word-break:break-all}
+.pod .sc{color:var(--dim);font-size:15px}
+
+/* ---------- student ---------- */
+#stu{gap:16px;justify-content:center}
+#stu .top{display:flex;align-items:center;gap:10px;font-size:14px;color:var(--dim)}
+#nick{width:100%;font-size:22px;padding:15px;border-radius:12px;background:#0d0f16;
+  border:2px solid var(--line);color:var(--fg);text-align:center;font-weight:600}
+.sopts{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
+.sopt{border-radius:16px;padding:22px 14px;color:#fff;font-weight:700;font-size:17px;
+  min-height:130px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;
+  text-align:center;line-height:1.3;transition:transform .1s,opacity .2s}
+.sopt .tag{width:38px;height:38px;border-radius:10px;background:rgba(255,255,255,.3);
+  display:grid;place-items:center;font-size:21px;flex:none}
+.sopt:active{transform:scale(.96)}
+.sopt.o0{background:var(--a)}.sopt.o1{background:var(--b)}.sopt.o2{background:var(--c)}.sopt.o3{background:var(--d)}
+.sopt.dead{opacity:.3}
+.big{font-size:60px;text-align:center;margin:10px 0}
+.mid{text-align:center;font-size:22px;font-weight:700}
+.pts{text-align:center;font-size:46px;font-weight:900;color:var(--gold);font-variant-numeric:tabular-nums}
+</style>
+</head>
+<body>
+
+<div id="banner"></div>
+
+<!-- ============ 题库：改这里就行 ============ -->
+<script>
+/* 每道题四个选项。answer 从 0 开始数：0=A, 1=B, 2=C, 3=D。
+   seconds 是这道题的限时（秒）。                                */
+const QUESTIONS = [
+  { q: "下列哪一项属于流动资产？",
+    options: ["厂房与设备", "应收账款", "长期借款", "商誉"],
+    answer: 1, seconds: 20 },
+
+  { q: "一家公司的毛利率持续高于同行，最可能说明什么？",
+    options: ["它的税率更低", "它有某种定价能力", "它的负债更多", "它的存货周转更慢"],
+    answer: 1, seconds: 20 },
+
+  { q: "在现金流量表里，支付员工工资属于哪一类？",
+    options: ["经营活动", "投资活动", "筹资活动", "不计入现金流量表"],
+    answer: 0, seconds: 20 },
+
+  { q: "净利润为正但经营现金流为负，最需要先怀疑什么？",
+    options: ["公司在偷税", "应收账款或存货在膨胀", "折旧计提太多", "股东分红太多"],
+    answer: 1, seconds: 25 },
+
+  { q: "其他条件不变，折现率上升会让一项资产的现值如何变化？",
+    options: ["上升", "下降", "不变", "先升后降"],
+    answer: 1, seconds: 15 },
+];
+/* ============ 题库到此结束 ============ */
+</script>
+
+<!-- 选择页 -->
+<div class="wrap hide" id="chooser">
+  <h1 style="font-size:34px">课堂抢答</h1>
+  <div class="card">
+    <div class="dim" style="font-size:15px">输入老师屏幕上的房间号</div>
+    <input id="joinCode" maxlength="4" autocomplete="off" autocapitalize="characters" placeholder="ABCD">
+    <button class="btn" id="goJoin" style="width:100%">进入</button>
+  </div>
+  <button class="btn ghost" id="goHost">我是老师，开一场</button>
+</div>
+
+<!-- 主持视图 -->
+<div class="wrap hide" id="host">
+  <div class="hbar">
+    <div><div class="dim" style="font-size:13px">房间号</div><div class="code" id="hCode">----</div></div>
+    <div class="spacer"></div>
+    <div id="hStatus" class="dim" style="font-size:15px"></div>
+  </div>
+
+  <!-- 大厅 -->
+  <div id="hLobby">
+    <div class="lobbyGrid">
+      <div>
+        <div id="qrbox"></div>
+        <div class="joinUrl" id="hUrl"></div>
+      </div>
+      <div class="card">
+        <div class="row">
+          <h2 style="font-size:24px">已加入 <span id="hCount">0</span> 人</h2>
+          <div class="spacer"></div>
+          <button class="btn ghost" id="hTest">测试连接</button>
+          <button class="btn" id="hStart" disabled>开始（<span id="hQn">0</span> 题）</button>
+        </div>
+        <div id="roster"></div>
+        <div class="dim" style="margin-top:16px;font-size:14px">
+          学生扫码或访问上面的地址，输入昵称即可。中途进来的人会自动跟上当前这一题。
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 出题 -->
+  <div id="hQuiz" class="hide">
+    <div class="qhead">
+      <h2 style="font-size:20px" class="dim">第 <span id="hQi">1</span> / <span id="hQt">1</span> 题</h2>
+      <div class="spacer"></div>
+      <div class="timer">
+        <div class="dim" style="font-size:19px"><span id="hAns">0</span> / <span id="hTot">0</span> 已作答</div>
+        <div class="ring" id="hRing"><span id="hSec">20</span></div>
+      </div>
+    </div>
+    <div class="qtext" id="hQ"></div>
+    <div class="opts" id="hOpts"></div>
+    <div class="row" style="margin-top:22px">
+      <div class="spacer"></div>
+      <button class="btn ghost" id="hSkip">立刻公布答案</button>
+    </div>
+  </div>
+
+  <!-- 公布 + 排行榜 -->
+  <div id="hReveal" class="hide">
+    <div class="row"><h2 style="font-size:26px" id="hRevTitle">正确答案</h2></div>
+    <div class="qtext" id="hQ2" style="font-size:min(3.2vw,30px);margin:14px 0 20px"></div>
+    <div class="opts" id="hOpts2"></div>
+    <div class="row" style="margin-top:24px">
+      <div class="spacer"></div>
+      <button class="btn" id="hBoard">看排行榜</button>
+    </div>
+  </div>
+
+  <div id="hLb" class="hide">
+    <h2 style="font-size:30px;margin-bottom:18px">排行榜</h2>
+    <table class="lb" id="hLbT"></table>
+    <div class="row" style="margin-top:26px">
+      <div class="spacer"></div>
+      <button class="btn" id="hNext">下一题</button>
+    </div>
+  </div>
+
+  <div id="hFinal" class="hide">
+    <h2 style="font-size:34px;text-align:center">最终成绩</h2>
+    <div class="podium" id="hPod"></div>
+    <table class="lb" id="hFinT"></table>
+    <div class="row" style="margin-top:26px">
+      <div class="spacer"></div>
+      <button class="btn ghost" id="hAgain">再来一局</button>
+    </div>
+  </div>
+</div>
+
+<!-- 学生视图 -->
+<div class="wrap hide" id="stu">
+  <div class="top"><span id="sRoom"></span><div class="spacer"></div><span id="sMe"></span></div>
+
+  <div id="sJoin">
+    <div class="card">
+      <h2 style="font-size:22px;text-align:center;margin-bottom:6px">起一个昵称</h2>
+      <div class="dim" style="text-align:center;font-size:14px;margin-bottom:14px">会显示在大屏幕上</div>
+      <input id="nick" maxlength="12" autocomplete="off" placeholder="例如：三号桌小王">
+      <button class="btn" id="sGo" style="width:100%;margin-top:14px">加入</button>
+    </div>
+  </div>
+
+  <div id="sWait" class="hide" style="text-align:center">
+    <div class="big">⏳</div>
+    <div class="mid" id="sWaitMsg">等老师开始</div>
+    <div class="dim" style="margin-top:10px;font-size:15px">保持这个页面开着就行</div>
+  </div>
+
+  <div id="sQuiz" class="hide">
+    <div class="row"><span class="dim" style="font-size:15px">第 <span id="sQi">1</span> 题</span>
+      <div class="spacer"></div><span class="dim" style="font-size:15px" id="sSec"></span></div>
+    <div style="font-size:19px;font-weight:700;margin:12px 0;line-height:1.4" id="sQ"></div>
+    <div class="sopts" id="sOpts"></div>
+  </div>
+
+  <div id="sDone" class="hide" style="text-align:center">
+    <div class="big">✋</div>
+    <div class="mid">已提交</div>
+    <div class="dim" style="margin-top:10px;font-size:15px">抬头看大屏幕</div>
+  </div>
+
+  <div id="sRes" class="hide" style="text-align:center">
+    <div class="big" id="sResIcon"></div>
+    <div class="mid" id="sResMsg"></div>
+    <div class="pts" id="sPts"></div>
+    <div class="dim" style="font-size:16px" id="sRank"></div>
+  </div>
+
+  <div id="sEnd" class="hide" style="text-align:center">
+    <div class="big">🏁</div>
+    <div class="mid">结束了</div>
+    <div class="pts" id="sEndPts"></div>
+    <div class="dim" style="font-size:16px" id="sEndRank"></div>
+  </div>
+</div>
+
+<script>
+/* ============================================================
+   0. 小工具
+   ============================================================ */
+const $ = id => document.getElementById(id);
+const show = (...ids) => ids.forEach(i => $(i).classList.remove('hide'));
+const hide = (...ids) => ids.forEach(i => $(i).classList.add('hide'));
+const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const LETTERS = ['A','B','C','D'];
+const ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';   // 去掉 I O 0 1，避免念错
+/* 用 crypto 取随机，不用 Math.random：某些浏览器每次加载给出同一序列，
+   那会让所有老师拿到同一个房间号。 */
+function randCode(n){
+  const out = [];
+  if (window.crypto && crypto.getRandomValues){
+    const b = new Uint8Array(n); crypto.getRandomValues(b);
+    for (let i=0;i<n;i++) out.push(ALPHABET[b[i] % ALPHABET.length]);
+  } else {
+    for (let i=0;i<n;i++) out.push(ALPHABET[Math.floor(Math.random()*ALPHABET.length)]);
+  }
+  return out.join('');
+}
+const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
+
+function banner(msg, cls, autohide){
+  const b = $('banner');
+  b.textContent = msg; b.className = 'show ' + cls;
+  clearTimeout(banner._t);
+  if (autohide) banner._t = setTimeout(() => b.className = cls, autohide);
+}
+function bannerOff(){ $('banner').className = ''; }
+
+/* 依次尝试多个来源加载脚本 */
+function loadScript(urls){
+  return new Promise((resolve, reject) => {
+    let i = 0;
+    (function attempt(){
+      if (i >= urls.length) return reject(new Error('all sources failed'));
+      const s = document.createElement('script');
+      s.src = urls[i++];
+      s.onload = resolve;
+      s.onerror = () => { s.remove(); attempt(); };
+      document.head.appendChild(s);
+    })();
+  });
+}
+
+/* ============================================================
+   1. 传输层：公共 MQTT 中继，主备两个
+   ============================================================ */
+/* 三个公共中继，按可靠性排序，连不上自动往下切。
+   实测 2026-09-08：mosquitto 通，hivemq 超时。 */
+const BROKERS = [
+  'wss://test.mosquitto.org:8081/',
+  'wss://broker.emqx.io:8084/mqtt',
+  'wss://broker.hivemq.com:8884/mqtt'
+];
+const ROOT = 'cq1';
+
+const Net = {
+  client:null, code:null, onMsg:null, onReady:null, topics:[], brokerIdx:0, everConnected:false,
+
+  async connect(code, topics, onMsg, onReady){
+    this.code = code; this.topics = topics; this.onMsg = onMsg; this.onReady = onReady;
+    await loadScript([
+      'https://cdnjs.cloudflare.com/ajax/libs/mqtt/5.10.1/mqtt.min.js',
+      'https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js'
+    ]);
+    this._open();
+  },
+
+  _open(){
+    const url = BROKERS[this.brokerIdx];
+    banner('正在连接…', 'warn');
+    const c = mqtt.connect(url, {
+      clientId: 'cq_' + randCode(10).toLowerCase(),
+      keepalive: 30, reconnectPeriod: 2500, connectTimeout: 8000, clean: true
+    });
+    this.client = c;
+
+    // 首次连不上就切备用中继
+    const failover = setTimeout(() => {
+      if (!this.everConnected && this.brokerIdx < BROKERS.length - 1){
+        this.brokerIdx++;
+        try { c.end(true); } catch(e){}
+        this._open();
+      }
+    }, 6000);
+
+    c.on('connect', () => {
+      clearTimeout(failover);
+      this.everConnected = true;
+      banner('已连接', 'ok', 1400);
+      // 只订阅本角色需要的主题，别让 50 台手机互相收答案
+      this.topics.forEach(t => c.subscribe(`${ROOT}/${this.code}/${t}`, {qos:0}));
+      // 每次连上（含断线重连）都让上层重新广播一次当前状态
+      if (this.onReady) this.onReady();
+    });
+    c.on('reconnect', () => banner('连接断开，正在重连…', 'warn'));
+    c.on('close',     () => { if (this.everConnected) banner('连接断开，正在重连…', 'warn'); });
+    c.on('error',     e  => console.warn('mqtt', e && e.message));
+    c.on('message', (topic, buf) => {
+      let d; try { d = JSON.parse(buf.toString()); } catch(e){ return; }
+      this.onMsg(topic.split('/').pop(), d);
+    });
+  },
+
+  pub(leaf, data, retain){
+    if (!this.client || !this.client.connected) return false;
+    this.client.publish(`${ROOT}/${this.code}/${leaf}`, JSON.stringify(data), {qos:0, retain:!!retain});
+    return true;
+  },
+  clearRetained(leaf){
+    if (this.client && this.client.connected)
+      this.client.publish(`${ROOT}/${this.code}/${leaf}`, '', {qos:0, retain:true});
+  },
+  ok(){ return !!(this.client && this.client.connected); }
+};
+
+/* ============================================================
+   2. 计分
+   ============================================================ */
+function scoreFor(correct, elapsedMs, limitSec){
+  if (!correct) return 0;
+  const t = clamp(elapsedMs/1000, 0, limitSec);
+  return clamp(Math.round(1000 * (1 - (t/limitSec)/2)), 0, 1000);
+}
+
+/* ============================================================
+   3. 主持端
+   ============================================================ */
+const Host = {
+  code:null, epoch:0, phase:'lobby', qi:-1,
+  players:new Map(),          // cid -> {nick, score, ans:{}}
+  qStart:0, timer:null, dist:[0,0,0,0], lastGain:{},
+
+  boot(){
+    const saved = JSON.parse(localStorage.getItem('cq_host') || 'null');
+    this.code  = (saved && saved.code) || randCode(4);
+    this.epoch = (saved && saved.epoch) || Date.now();
+
+    $('hCode').textContent = this.code;
+    $('hQn').textContent = QUESTIONS.length;
+    $('hQt').textContent = QUESTIONS.length;
+
+    const url = location.origin + location.pathname + '#j=' + this.code;
+    $('hUrl').textContent = url;
+    loadScript([
+      'https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js',
+      'https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js'
+    ]).then(() => new QRCode($('qrbox'), {text:url, width:272, height:272,
+        correctLevel: QRCode.CorrectLevel.M}))
+      .catch(() => $('qrbox').innerHTML =
+        '<div style="color:#333;padding:22px;font-size:14px">二维码组件没加载出来，让学生手输上面的网址和房间号</div>');
+
+    if (saved && saved.players){
+      saved.players.forEach(p => this.players.set(p.cid, {nick:p.nick, score:p.score, ans:p.ans||{}}));
+      this.renderRoster();
+    }
+
+    Net.connect(this.code, ['join','answer'],
+      (leaf, d) => this.onMsg(leaf, d),
+      () => { this.publishState(); this.publishBoard(); });
+    this.wire();
+    this.save();          // 立刻存房间号，老师中途刷新不会换码
+  },
+
+  save(){
+    if (this._wiped) return;      // 重开一局时别让 beforeunload 把旧分数写回去
+    localStorage.setItem('cq_host', JSON.stringify({
+      code:this.code, epoch:this.epoch,
+      players:[...this.players].map(([cid,p]) => ({cid, nick:p.nick, score:p.score, ans:p.ans}))
+    }));
+  },
+
+  wire(){
+    $('hStart').onclick = () => this.nextQuestion();
+    $('hNext').onclick  = () => this.nextQuestion();
+    $('hSkip').onclick  = () => this.reveal();
+    $('hBoard').onclick = () => this.showBoard();
+    $('hTest').onclick  = () => banner(Net.ok() ? '中继连接正常，可以上课' : '还没连上，等几秒再点',
+                                       Net.ok() ? 'ok' : 'bad', 2600);
+    $('hAgain').onclick = () => {
+      if (!confirm('清空所有人的分数，重新开始？')) return;
+      this._wiped = true;
+      localStorage.removeItem('cq_host');
+      Net.clearRetained('state'); Net.clearRetained('board');
+      setTimeout(() => location.reload(), 400);
+    };
+    window.addEventListener('beforeunload', () => this.save());
+  },
+
+  onMsg(leaf, d){
+    if (leaf === 'join')   return this.onJoin(d);
+    if (leaf === 'answer') return this.onAnswer(d);
+  },
+
+  onJoin(d){
+    if (!d || !d.cid || !d.nick) return;
+    const existing = this.players.get(d.cid);
+    let nick = String(d.nick).slice(0,12);
+    // 昵称撞车就加个后缀
+    const taken = n => [...this.players].some(([c,p]) => c !== d.cid && p.nick === n);
+    if (taken(nick)){ let k = 2; while (taken(nick + k)) k++; nick = nick + k; }
+
+    if (existing) existing.nick = nick;
+    else this.players.set(d.cid, {nick, score:0, ans:{}});
+
+    this.renderRoster(); this.save(); this.publishBoard();
+  },
+
+  onAnswer(d){
+    if (this.phase !== 'question' || !d || !d.cid) return;
+    if (d.qIndex !== this.qi) return;
+    const p = this.players.get(d.cid);
+    if (!p || p.ans[this.qi] !== undefined) return;      // 一题只认第一次
+
+    const q = QUESTIONS[this.qi];
+    const elapsed = Date.now() - this.qStart;
+    if (elapsed > q.seconds*1000 + 1500) return;         // 1.5 秒宽限，超了不算
+
+    const choice = Number(d.choice);
+    if (!(choice >= 0 && choice < q.options.length)) return;
+
+    const gain = scoreFor(choice === q.answer, elapsed, q.seconds);
+    p.ans[this.qi] = choice;
+    p.score += gain;
+    this.lastGain[d.cid] = gain;
+    this.dist[choice]++;
+
+    $('hAns').textContent = [...this.players.values()]
+      .filter(x => x.ans[this.qi] !== undefined).length;
+    this.paintDist();
+
+    // 全答完就提前公布
+    if ([...this.players.values()].every(x => x.ans[this.qi] !== undefined)) {
+      setTimeout(() => { if (this.phase === 'question') this.reveal(); }, 600);
+    }
+  },
+
+  renderRoster(){
+    $('hCount').textContent = this.players.size;
+    $('hTot').textContent   = this.players.size;
+    $('hStart').disabled    = this.players.size === 0;
+    const box = $('roster');
+    box.innerHTML = [...this.players.values()]
+      .map(p => `<div class="chip">${esc(p.nick)}</div>`).join('');
+  },
+
+  nextQuestion(){
+    this.qi++;
+    if (this.qi >= QUESTIONS.length) return this.finish();
+    const q = QUESTIONS[this.qi];
+    this.phase = 'question'; this.qStart = Date.now();
+    this.dist = [0,0,0,0]; this.lastGain = {};
+
+    hide('hLobby','hReveal','hLb','hFinal'); show('hQuiz');
+    $('hQi').textContent = this.qi + 1;
+    $('hQ').textContent  = q.q;
+    $('hAns').textContent = '0';
+    $('hOpts').innerHTML = q.options.map((o,i) =>
+      `<div class="opt o${i}" data-i="${i}"><div class="tag">${LETTERS[i]}</div>
+       <div>${esc(o)}</div><div class="cnt"></div><div class="bar"></div></div>`).join('');
+
+    this.publishState();
+
+    clearInterval(this.timer);
+    const tick = () => {
+      const left = q.seconds - (Date.now() - this.qStart)/1000;
+      $('hSec').textContent = Math.max(0, Math.ceil(left));
+      $('hRing').style.setProperty('--p', clamp(left/q.seconds*100, 0, 100));
+      if (left <= 0){ clearInterval(this.timer); this.reveal(); }
+    };
+    tick(); this.timer = setInterval(tick, 200);
+    this.save();
+  },
+
+  paintDist(){
+    const total = Math.max(1, this.dist.reduce((a,b) => a+b, 0));
+    [...$('hOpts').children].forEach((el,i) => {
+      el.querySelector('.cnt').textContent = this.dist[i] || '';
+      el.querySelector('.bar').style.width = (this.dist[i]/total*100) + '%';
+    });
+  },
+
+  reveal(){
+    if (this.phase !== 'question') return;
+    clearInterval(this.timer);
+    this.phase = 'reveal';
+    const q = QUESTIONS[this.qi];
+    const total = Math.max(1, this.dist.reduce((a,b) => a+b, 0));
+
+    hide('hQuiz'); show('hReveal');
+    $('hQ2').textContent = q.q;
+    $('hRevTitle').textContent = `正确答案：${LETTERS[q.answer]}`;
+    $('hOpts2').innerHTML = q.options.map((o,i) =>
+      `<div class="opt o${i} ${i===q.answer?'':'faded'}">
+         <div class="tag">${LETTERS[i]}</div><div>${esc(o)}</div>
+         <div class="cnt">${this.dist[i]} 人</div>
+         ${i===q.answer?'<div class="tick">✔</div>':''}
+         <div class="bar" style="width:${this.dist[i]/total*100}%"></div></div>`).join('');
+
+    // 先发分数再发状态，学生那边才不会先闪一下 0 分
+    this._publishBoardNow(); this.publishState(); this.save();
+  },
+
+  showBoard(){ hide('hReveal'); show('hLb'); $('hLbT').innerHTML = this.boardRows(10);
+    $('hNext').textContent = this.qi >= QUESTIONS.length-1 ? '看最终成绩' : '下一题'; },
+
+  ranked(){ return [...this.players.values()].sort((a,b) => b.score - a.score); },
+
+  boardRows(n){
+    return this.ranked().slice(0,n).map((p,i) =>
+      `<tr class="${i<3?'medal'+(i+1):''}"><td class="r">${i+1}</td>
+       <td>${esc(p.nick)}</td><td class="s">${p.score}</td></tr>`).join('')
+      || '<tr><td class="dim" style="text-align:center;padding:26px">还没有人得分</td></tr>';
+  },
+
+  finish(){
+    this.phase = 'final'; clearInterval(this.timer);
+    hide('hQuiz','hReveal','hLb','hLobby'); show('hFinal');
+    const top = this.ranked().slice(0,3);
+    const H = [200,150,115], ORDER = [1,0,2];   // H 按名次：第一名最高；ORDER 是左中右的摆法
+    $('hPod').innerHTML = ORDER.filter(i => top[i]).map(i =>
+      `<div class="pod"><div class="nm">${esc(top[i].nick)}</div>
+       <div class="bar2" style="height:${H[i]}px">${i+1}</div>
+       <div class="sc">${top[i].score} 分</div></div>`).join('');
+    $('hFinT').innerHTML = this.boardRows(20);
+    this._publishBoardNow(); this.publishState(); this.save();
+  },
+
+  publishState(){
+    const q = this.phase === 'question' || this.phase === 'reveal' ? QUESTIONS[this.qi] : null;
+    Net.pub('state', {
+      epoch:this.epoch, phase:this.phase, qIndex:this.qi, total:QUESTIONS.length,
+      question: q ? q.q : null,
+      options:  q ? q.options : null,
+      seconds:  q ? q.seconds : null,
+      answer:   this.phase === 'reveal' ? q.answer : null,
+      startedAt:this.qStart, hostNow:Date.now()
+    }, true);
+  },
+
+  /* 50 个人几秒内一起进来会触发 50 次广播，公共中继会限流。攒 400 毫秒发一次。 */
+  publishBoard(){
+    clearTimeout(this._bt);
+    this._bt = setTimeout(() => this._publishBoardNow(), 400);
+  },
+
+  _publishBoardNow(){
+    const all = this.ranked();
+    Net.pub('board', {
+      epoch:this.epoch, qIndex:this.qi,
+      gains:this.lastGain,
+      list:[...this.players].map(([cid,p]) => ({cid, nick:p.nick, score:p.score}))
+             .sort((a,b) => b.score - a.score),
+      size:all.length
+    }, true);
+  }
+};
+
+/* ============================================================
+   4. 学生端
+   ============================================================ */
+const Stu = {
+  code:null, cid:null, nick:null, joined:false,
+  state:null, board:null, answeredQ:-1, skew:0, timer:null,
+
+  boot(code){
+    this.code = code;
+    $('sRoom').textContent = '房间 ' + code;
+    this.cid = localStorage.getItem('cq_cid');
+    if (!this.cid){ this.cid = randCode(12); localStorage.setItem('cq_cid', this.cid); }
+    const savedNick = localStorage.getItem('cq_nick_' + code);
+    if (savedNick) $('nick').value = savedNick;
+
+    $('sGo').onclick = () => this.join();
+    $('nick').addEventListener('keydown', e => { if (e.key === 'Enter') this.join(); });
+
+    Net.connect(code, ['state','board'], (leaf, d) => {
+      if (leaf === 'state'){ this.state = d; this.render(); }
+      if (leaf === 'board'){ this.board = d; this.render(); }
+    }, () => {
+      // 断线重连后立刻重新报到，免得老师那边把人弄丢
+      if (this.joined) Net.pub('join', {cid:this.cid, nick:this.nick});
+    });
+  },
+
+  join(){
+    const n = $('nick').value.trim();
+    if (!n) return $('nick').focus();
+    if (!Net.ok()) return banner('还没连上，稍等一下再点', 'bad', 2200);
+    this.nick = n.slice(0,12); this.joined = true;
+    localStorage.setItem('cq_nick_' + this.code, this.nick);
+    Net.pub('join', {cid:this.cid, nick:this.nick});
+    $('sMe').textContent = this.nick;
+    hide('sJoin'); this.render();
+    // 重连后重新报到
+    setInterval(() => { if (this.joined && Net.ok()) Net.pub('join', {cid:this.cid, nick:this.nick}); }, 20000);
+  },
+
+  me(){ return this.board && this.board.list ? this.board.list.find(x => x.cid === this.cid) : null; },
+  myRank(){
+    if (!this.board || !this.board.list) return null;
+    const i = this.board.list.findIndex(x => x.cid === this.cid);
+    return i < 0 ? null : {rank:i+1, of:this.board.list.length};
+  },
+
+  render(){
+    if (!this.joined || !this.state) return;
+    const s = this.state;
+    hide('sWait','sQuiz','sDone','sRes','sEnd');
+
+    if (s.phase === 'lobby'){ show('sWait'); $('sWaitMsg').textContent = '等老师开始'; return; }
+
+    if (s.phase === 'question'){
+      if (this.answeredQ === s.qIndex){ show('sDone'); return; }
+      show('sQuiz');
+      $('sQi').textContent = s.qIndex + 1;
+      $('sQ').textContent  = s.question;
+      $('sOpts').innerHTML = s.options.map((o,i) =>
+        `<div class="sopt o${i}" data-i="${i}"><div class="tag">${LETTERS[i]}</div><div>${esc(o)}</div></div>`).join('');
+      [...$('sOpts').children].forEach(el => el.onclick = () => this.answer(+el.dataset.i));
+
+      this.skew = Date.now() - s.hostNow;
+      clearInterval(this.timer);
+      const tick = () => {
+        const left = s.seconds - (Date.now() - this.skew - s.startedAt)/1000;
+        $('sSec').textContent = Math.max(0, Math.ceil(left)) + ' 秒';
+        if (left <= 0) clearInterval(this.timer);
+      };
+      tick(); this.timer = setInterval(tick, 250);
+      return;
+    }
+
+    if (s.phase === 'reveal'){
+      clearInterval(this.timer);
+      show('sRes');
+      const my   = this.answeredQ === s.qIndex ? this.myChoice : null;
+      const gain = this.board && this.board.gains ? (this.board.gains[this.cid] || 0) : 0;
+      const right = my !== null && my === s.answer;
+      $('sResIcon').textContent = my === null ? '😴' : (right ? '🎉' : '💥');
+      $('sResMsg').textContent  = my === null ? '这题没作答'
+                                 : (right ? '答对了' : `答错了，正确答案是 ${LETTERS[s.answer]}`);
+      $('sPts').textContent = (gain > 0 ? '+' : '') + gain;
+      const me = this.me(), r = this.myRank();
+      $('sRank').textContent = me && r ? `总分 ${me.score}　第 ${r.rank} / ${r.of} 名` : '';
+      return;
+    }
+
+    if (s.phase === 'final'){
+      clearInterval(this.timer);
+      show('sEnd');
+      const me = this.me(), r = this.myRank();
+      $('sEndPts').textContent  = me ? me.score + ' 分' : '';
+      $('sEndRank').textContent = r ? `第 ${r.rank} / ${r.of} 名` : '';
+    }
+  },
+
+  answer(i){
+    const s = this.state;
+    if (!s || s.phase !== 'question' || this.answeredQ === s.qIndex) return;
+    this.answeredQ = s.qIndex; this.myChoice = i;
+    Net.pub('answer', {cid:this.cid, nick:this.nick, qIndex:s.qIndex, choice:i});
+    clearInterval(this.timer);
+    hide('sQuiz'); show('sDone');
+  }
+};
+
+/* ============================================================
+   5. 路由
+   ============================================================ */
+function route(){
+  const h = location.hash;
+  hide('chooser','host','stu');
+  if (h === '#host'){ show('host'); Host.boot(); return; }
+  const m = h.match(/^#j=([A-Za-z0-9]{4})$/);
+  if (m){ show('stu'); Stu.boot(m[1].toUpperCase()); return; }
+
+  show('chooser');
+  $('goHost').onclick = () => { location.hash = '#host'; location.reload(); };
+  $('goJoin').onclick = () => {
+    const c = $('joinCode').value.trim().toUpperCase();
+    if (c.length !== 4) return $('joinCode').focus();
+    location.hash = '#j=' + c; location.reload();
+  };
+  $('joinCode').addEventListener('keydown', e => { if (e.key === 'Enter') $('goJoin').click(); });
+}
+route();
+</script>
+</body>
+</html>
