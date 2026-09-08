@@ -466,7 +466,7 @@ T: 25"></textarea>
 
   <div id="sDone" class="hide" style="text-align:center">
     <div class="big">✋</div>
-    <div class="mid">已提交</div>
+    <div class="mid" id="sDoneMsg">已提交</div>
     <div class="dim" style="margin-top:10px;font-size:15px">抬头看大屏幕</div>
   </div>
 
@@ -734,7 +734,7 @@ const Host = {
     $('hSet').onchange  = () => { this.setName = $('hSet').value; this.applySet(); this.save(); };
     $('hStart').onclick = () => { $('hSet').disabled = true; this.nextQuestion(); };
     $('hNext').onclick  = () => this.nextQuestion();
-    $('hSkip').onclick  = () => this.reveal();
+    $('hSkip').onclick  = () => this.closeQuestion(this.CLOSING_MS);
     $('hBoard').onclick = () => this.showBoard();
     $('hEnd').onclick   = () => { if (confirm('不做剩下的题，直接结算？')) this.finish(); };
     $('hDl1').onclick   = () => this.downloadLog();
@@ -770,15 +770,26 @@ const Host = {
     this.renderRoster(); this.save(); this.publishBoard();
   },
 
+  /* 出题中和"收尾"这两秒都收答案。老师提前公布或倒计时结束时，先进入收尾，
+     等还在路上的答案到齐，再真正公布。已经点了的学生不会因为老师手快而丢分。 */
+  ANSWER_GRACE_MS: 2500,
+  CLOSING_MS: 2000,
+
   onAnswer(d){
-    if (this.phase !== 'question' || !d || !d.cid) return;
+    if ((this.phase !== 'question' && this.phase !== 'closing') || !d || !d.cid) return;
     if (d.qIndex !== this.qi) return;
-    const p = this.players.get(d.cid);
-    if (!p || p.ans[this.qi] !== undefined) return;      // 一题只认第一次
+    let p = this.players.get(d.cid);
+    if (!p){
+      // 老师端不认识这个人（老师刷新过、名单被清过），按答案里的昵称补登记，别丢答案
+      if (!d.nick) return;
+      p = {nick:String(d.nick).slice(0,12), score:0, ans:{}};
+      this.players.set(d.cid, p); this.renderRoster();
+    }
+    if (p.ans[this.qi] !== undefined) return;            // 一题只认第一次
 
     const q = this.qs()[this.qi];
     const elapsed = Date.now() - this.qStart;
-    if (elapsed > q.seconds*1000 + 1500) return;         // 1.5 秒宽限，超了不算
+    if (elapsed > q.seconds*1000 + this.ANSWER_GRACE_MS) return;   // 超时太多不算
 
     const choice = Number(d.choice);
     if (!(choice >= 0 && choice < q.options.length)) return;
@@ -794,9 +805,9 @@ const Host = {
     $('hAns').textContent = [...this.players.values()]
       .filter(x => x.ans[this.qi] !== undefined).length;
 
-    // 全答完就提前公布
-    if ([...this.players.values()].every(x => x.ans[this.qi] !== undefined)) {
-      setTimeout(() => { if (this.phase === 'question') this.reveal(); }, 600);
+    // 全答完就提前公布（仍留 0.6 秒收尾）
+    if (this.phase === 'question' && [...this.players.values()].every(x => x.ans[this.qi] !== undefined)) {
+      this.closeQuestion(600);
     }
   },
 
@@ -832,18 +843,34 @@ const Host = {
       const left = q.seconds - (Date.now() - this.qStart)/1000;
       $('hSec').textContent = Math.max(0, Math.ceil(left));
       $('hRing').style.setProperty('--p', clamp(left/q.seconds*100, 0, 100));
-      if (left <= 0){ clearInterval(this.timer); this.reveal(); }
+      if (left <= 0){ clearInterval(this.timer); this.closeQuestion(this.CLOSING_MS); }
     };
     tick(); this.timer = setInterval(tick, 200);
     this.save();
   },
 
-  reveal(){
+  closeQuestion(waitMs){
     if (this.phase !== 'question') return;
+    this.phase = 'closing';
+    clearInterval(this.timer);
+    $('hSec').textContent = '0';
+    $('hRing').style.setProperty('--p', 0);
+    $('hSkip').textContent = '收尾中，等最后几份答案…'; $('hSkip').disabled = true;
+    this.publishState();                       // 学生端立刻锁住按钮
+    setTimeout(() => this.reveal(), waitMs);
+  },
+
+  reveal(){
+    if (this.phase !== 'question' && this.phase !== 'closing') return;
     clearInterval(this.timer);
     this.phase = 'reveal';
+    $('hSkip').textContent = '立刻公布答案'; $('hSkip').disabled = false;
     const q = this.qs()[this.qi];
-    const total = Math.max(1, this.dist.reduce((a,b) => a+b, 0));
+    // 分布从名单重新数一遍，不依赖过程中的累加
+    this.dist = [0,0,0,0];
+    for (const p of this.players.values()){ const a = p.ans[this.qi]; if (a !== undefined) this.dist[a]++; }
+    const received = this.dist.reduce((a,b) => a+b, 0), total = Math.max(1, received);
+    $('hStatus').textContent = `收到 ${received} / ${this.players.size} 人的答案`;
 
     hide('hQuiz'); show('hReveal');
     $('hQ2').textContent = q.q;
@@ -1008,7 +1035,7 @@ const Host = {
   },
 
   publishState(){
-    const q = this.phase === 'question' || this.phase === 'reveal' ? this.qs()[this.qi] : null;
+    const q = ['question','closing','reveal'].includes(this.phase) ? this.qs()[this.qi] : null;
     Net.pub('state', {
       epoch:this.epoch, phase:this.phase, qIndex:this.qi, total:this.qs().length,
       question: q ? q.q : null,
@@ -1092,8 +1119,15 @@ const Stu = {
 
     if (s.phase === 'lobby'){ show('sWait'); $('sWaitMsg').textContent = '等老师开始'; return; }
 
+    if (s.phase === 'closing'){
+      // 老师正在收尾：已答的显示已提交，没答的显示时间到
+      clearInterval(this.timer);
+      $('sDoneMsg').textContent = this.answeredQ === s.qIndex ? '已提交' : '时间到';
+      show('sDone'); return;
+    }
+
     if (s.phase === 'question'){
-      if (this.answeredQ === s.qIndex){ show('sDone'); return; }
+      if (this.answeredQ === s.qIndex){ $('sDoneMsg').textContent = '已提交'; show('sDone'); return; }
       show('sQuiz');
       $('sQi').textContent = s.qIndex + 1;
       $('sQ').textContent  = (s.survey ? '【调查】' : '') + s.question;
@@ -1125,8 +1159,18 @@ const Stu = {
         $('sRank').textContent = '调查题不计分，看大屏幕上的分布';
         return;
       }
-      const gain = this.board && this.board.gains ? (this.board.gains[this.cid] || 0) : 0;
+      const gains = (this.board && this.board.qIndex === s.qIndex && this.board.gains) || {};
+      const received = this.cid in gains;
+      const gain = gains[this.cid] || 0;
       const right = my !== null && my === s.answer;
+      if (my !== null && !received){
+        // 学生点了，但老师端没收到（网络太慢或到得太晚）。说清楚，别让人以为答对了没给分
+        $('sResIcon').textContent = '📡';
+        $('sResMsg').textContent  = `答案没送到老师那里，这题没算分（正确答案是 ${LETTERS[s.answer]}）`;
+        $('sPts').textContent = '';
+        $('sRank').textContent = me && r ? `总分 ${me.score}　第 ${r.rank} / ${r.of} 名` : '';
+        return;
+      }
       $('sResIcon').textContent = my === null ? '😴' : (right ? '🎉' : '💥');
       $('sResMsg').textContent  = my === null ? '这题没作答'
                                  : (right ? '答对了' : `答错了，正确答案是 ${LETTERS[s.answer]}`);
@@ -1150,6 +1194,7 @@ const Stu = {
     this.answeredQ = s.qIndex; this.myChoice = i;
     Net.pub('answer', {cid:this.cid, nick:this.nick, qIndex:s.qIndex, choice:i});
     clearInterval(this.timer);
+    $('sDoneMsg').textContent = '已提交';
     hide('sQuiz'); show('sDone');
   }
 };
@@ -1209,7 +1254,7 @@ const Editor = {
     const r = Bank.parse($('edText').value);
     if (r.errors.length) return this.msg('先把右上角列出的格式问题改掉', false);
     const p1 = $('edPass').value, p2 = $('edPass2').value;
-    if (p1.length < 8) return this.msg('密码至少 8 个字符，建议用一句话', false);
+    if (p1.length < 6) return this.msg('密码至少 6 个字符，建议用一句话', false);
     if (p1 !== p2) return this.msg('两次密码不一样', false);
     this.msg('加密中…', true);
     const blob = await Bank.encrypt($('edText').value, p1);
