@@ -58,6 +58,9 @@ h1,h2,h3{margin:0;font-weight:700;line-height:1.25}
 #roster{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px;max-height:44vh;overflow:auto}
 .chip{background:#262b3a;border-radius:999px;padding:7px 14px;font-size:15px;font-weight:600}
 .chip.new{animation:pop .3s}
+#hSet{font:inherit;font-size:16px;font-weight:600;color:var(--fg);background:#0d0f16;
+  border:1px solid var(--line);border-radius:10px;padding:9px 12px;min-width:260px}
+#hSet:disabled{opacity:.5}
 @keyframes pop{from{transform:scale(.6);opacity:0}}
 
 .qhead{display:flex;align-items:baseline;gap:14px}
@@ -93,6 +96,35 @@ table.lb tr.me td{background:#243049}
 .pod .nm{font-weight:700;font-size:19px;margin-bottom:8px;word-break:break-all}
 .pod .sc{color:var(--dim);font-size:15px}
 
+/* 错得最多的题 */
+#hWeak{margin:6px 0 26px}
+#hWeak h3{font-size:22px;margin-bottom:12px}
+.weak{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:18px 20px;margin-bottom:12px}
+.weak .wq{font-size:min(2.6vw,22px);font-weight:700;line-height:1.35}
+.weak .wmeta{color:var(--dim);font-size:15px;margin:6px 0 12px}
+.weak .wmeta b{color:var(--a);font-weight:800}
+.wopts{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+@media(max-width:700px){.wopts{grid-template-columns:1fr}}
+.wopt{position:relative;overflow:hidden;display:flex;align-items:center;gap:10px;
+  border-radius:10px;padding:10px 12px;font-size:16px;font-weight:600;
+  background:#262b3a;color:var(--dim)}
+.wopt.ok{background:#1f4a35;color:var(--fg)}
+.wopt .tag{width:26px;height:26px;border-radius:6px;background:rgba(255,255,255,.15);
+  display:grid;place-items:center;font-size:14px;flex:none}
+.wopt .wc{margin-left:auto;font-variant-numeric:tabular-nums}
+.wopt .bar{position:absolute;left:0;bottom:0;height:4px;background:rgba(255,255,255,.6)}
+
+/* ---------- editor / unlock ---------- */
+.editGrid{display:grid;grid-template-columns:1fr 380px;gap:18px;align-items:start}
+@media(max-width:900px){.editGrid{grid-template-columns:1fr}}
+#edText{width:100%;min-height:70vh;font:14px/1.5 ui-monospace,Menlo,Consolas,monospace;background:#0d0f16;color:var(--fg);
+  border:1px solid var(--line);border-radius:12px;padding:14px;resize:vertical}
+input.pw{font:inherit;font-size:15px;padding:9px 12px;border-radius:10px;border:1px solid var(--line);background:#0d0f16;color:var(--fg);min-width:220px}
+.btn.sm{padding:9px 14px;font-size:14px}
+.edErr{color:#ff8a95;font-size:14px;margin-top:6px;line-height:1.5}
+.edOk{color:#7fd8a5;font-size:14px}
+#edit code{background:#262b3a;padding:1px 5px;border-radius:5px}
+
 /* ---------- student ---------- */
 #stu{gap:16px;justify-content:center}
 #stu .top{display:flex;align-items:center;gap:10px;font-size:14px;color:var(--dim)}
@@ -116,32 +148,134 @@ table.lb tr.me td{background:#243049}
 
 <div id="banner"></div>
 
-<!-- ============ 题库：改这里就行 ============ -->
+<!-- ============ 题库 ============
+     题目不再写在这个文件里。它们加密存放在同目录的 bank.json，
+     老师页面输入密码后解锁；用 #edit 页面编辑并生成新的 bank.json。
+     下面只留一套演示题，题库没加载时用来试机器。 -->
 <script>
-/* 每道题四个选项。answer 从 0 开始数：0=A, 1=B, 2=C, 3=D。
-   seconds 是这道题的限时（秒）。                                */
-const QUESTIONS = [
-  { q: "下列哪一项属于流动资产？",
-    options: ["厂房与设备", "应收账款", "长期借款", "商誉"],
-    answer: 1, seconds: 20 },
+let QUESTION_SETS = {
+  "（演示）调查示例": [
+    { q: "这是演示题。正式题库还没解锁。你觉得这周的内容难度如何？",
+      options: ["太简单", "刚好", "有点难", "完全跟不上"],
+      survey: true, seconds: 30 },
+  ],
+};
 
-  { q: "一家公司的毛利率持续高于同行，最可能说明什么？",
-    options: ["它的税率更低", "它有某种定价能力", "它的负债更多", "它的存货周转更慢"],
-    answer: 1, seconds: 20 },
+/* ============================================================
+   题库文本格式解析。格式：
+     ## 套题名字
+     Q: 题干（可以多行）
+     A. 选项
+     B. 选项 *        <- 星号标正确答案
+     T: 25            <- 限时秒数，可省略
+     survey           <- 调查题写这一行，不打星号
+   ============================================================ */
+const Bank = {
+  parse(text){
+    const sets = {}, errors = [];
+    let setName = null, q = null, order = [];
+    const lines = String(text).replace(/\r\n?/g, '\n').split('\n');
 
-  { q: "在现金流量表里，支付员工工资属于哪一类？",
-    options: ["经营活动", "投资活动", "筹资活动", "不计入现金流量表"],
-    answer: 0, seconds: 20 },
+    const finishQ = () => {
+      if (!q) return;
+      const where = `第 ${q.line} 行开始的题`;
+      const isTF = q.options.length === 2 &&
+        /^(true|false|对|错|是|否)$/i.test(q.options[0]) && /^(true|false|对|错|是|否)$/i.test(q.options[1]);
+      if (!q.q.trim()) errors.push(`${where}：题干是空的`);
+      if (q.options.length < 2) errors.push(`${where}：选项不足 2 个`);
+      if (q.options.length > 4) errors.push(`${where}：选项超过 4 个（最多 A 到 D）`);
+      if (q.survey && q.answer !== null) errors.push(`${where}：调查题不能打星号`);
+      if (!q.survey && q.answer === null) errors.push(`${where}：没有标正确答案（在正确选项后面加 *；如果是调查题，加一行 survey）`);
+      if (q.starCount > 1) errors.push(`${where}：标了 ${q.starCount} 个正确答案，只能有 1 个`);
+      const out = { q: q.q.trim(), options: q.options, seconds: q.seconds || (isTF ? 15 : 25) };
+      if (q.survey) out.survey = true; else out.answer = q.answer;
+      if (!sets[setName]){ sets[setName] = []; order.push(setName); }
+      sets[setName].push(out);
+      q = null;
+    };
 
-  { q: "净利润为正但经营现金流为负，最需要先怀疑什么？",
-    options: ["公司在偷税", "应收账款或存货在膨胀", "折旧计提太多", "股东分红太多"],
-    answer: 1, seconds: 25 },
+    lines.forEach((raw, idx) => {
+      const n = idx + 1, line = raw.trim();
+      if (!line) return;
+      if (line.startsWith('##')){ finishQ(); setName = line.replace(/^#+\s*/, '').trim() || `未命名 ${n}`; return; }
+      if (line.startsWith('#')) return;                                   // 注释
+      if (/^q\s*[:：]/i.test(line)){
+        finishQ();
+        if (!setName){ setName = '未命名'; }
+        q = { line:n, q:line.replace(/^q\s*[:：]\s*/i, ''), options:[], answer:null, starCount:0, survey:false, seconds:0 };
+        return;
+      }
+      if (!q){ errors.push(`第 ${n} 行：不在任何题目里（题目要以 Q: 开头）`); return; }
+      let m;
+      if ((m = line.match(/^([A-Da-d])\s*[\.\)、．:：]\s*(.*)$/))){
+        let text = m[2].trim(), star = false;
+        if (/\*\s*$/.test(text)){ star = true; text = text.replace(/\s*\*\s*$/, ''); }
+        if (/^\*/.test(text)){ star = true; text = text.replace(/^\*\s*/, ''); }
+        const letter = m[1].toUpperCase().charCodeAt(0) - 65;
+        if (letter !== q.options.length) errors.push(`第 ${n} 行：选项字母应该是 ${LETTERS[q.options.length] || '（已满）'}，写成了 ${m[1].toUpperCase()}`);
+        q.options.push(text);
+        if (star){ q.starCount++; q.answer = q.options.length - 1; }
+        return;
+      }
+      if ((m = line.match(/^t\s*[:：]\s*(\d+)\s*$/i))){ q.seconds = Math.max(5, Math.min(300, +m[1])); return; }
+      if (/^survey$/i.test(line) || /^调查$/.test(line)){ q.survey = true; return; }
+      if (q.options.length === 0){ q.q += '\n' + line; return; }   // 多行题干
+      errors.push(`第 ${n} 行：看不懂这一行（选项要以 A. B. C. D. 开头）`);
+    });
+    finishQ();
 
-  { q: "其他条件不变，折现率上升会让一项资产的现值如何变化？",
-    options: ["上升", "下降", "不变", "先升后降"],
-    answer: 1, seconds: 15 },
-];
-/* ============ 题库到此结束 ============ */
+    if (!order.length && !errors.length) errors.push('没有解析到任何题目');
+    const ordered = {}; order.forEach(k => ordered[k] = sets[k]);
+    return { sets: ordered, errors, count: order.reduce((s,k) => s + sets[k].length, 0) };
+  },
+
+  /* 把题库对象还原成文本（编辑页"读入"时用，也用于导出备份） */
+  stringify(sets){
+    const out = [];
+    for (const [name, qs] of Object.entries(sets)){
+      out.push(`## ${name}`, '');
+      qs.forEach(x => {
+        out.push('Q: ' + x.q.replace(/\n/g, '\n   '));
+        x.options.forEach((o,i) => out.push(`${LETTERS[i]}. ${o}${(!x.survey && i === x.answer) ? ' *' : ''}`));
+        if (x.survey) out.push('survey');
+        out.push(`T: ${x.seconds}`, '');
+      });
+    }
+    return out.join('\n');
+  },
+
+  /* ---- 加密：PBKDF2-SHA256 派生密钥，AES-256-GCM 加密 ---- */
+  ITER: 200000,
+  b64: b => btoa(String.fromCharCode(...new Uint8Array(b))),
+  unb64: s => Uint8Array.from(atob(s), c => c.charCodeAt(0)),
+
+  async key(pass, salt){
+    const base = await crypto.subtle.importKey('raw', new TextEncoder().encode(pass), 'PBKDF2', false, ['deriveKey']);
+    return crypto.subtle.deriveKey({name:'PBKDF2', salt, iterations:this.ITER, hash:'SHA-256'},
+      base, {name:'AES-GCM', length:256}, false, ['encrypt','decrypt']);
+  },
+
+  async encrypt(text, pass){
+    const salt = crypto.getRandomValues(new Uint8Array(16)), iv = crypto.getRandomValues(new Uint8Array(12));
+    const k = await this.key(pass, salt);
+    const ct = await crypto.subtle.encrypt({name:'AES-GCM', iv}, k, new TextEncoder().encode(text));
+    return { v:1, kdf:'PBKDF2-SHA256', iter:this.ITER, salt:this.b64(salt), iv:this.b64(iv), ct:this.b64(ct),
+             made:new Date().toISOString() };
+  },
+
+  async decrypt(blob, pass){
+    const k = await this.key(pass, this.unb64(blob.salt));
+    const pt = await crypto.subtle.decrypt({name:'AES-GCM', iv:this.unb64(blob.iv)}, k, this.unb64(blob.ct));
+    return new TextDecoder().decode(pt);
+  },
+
+  /* 老师页面：从站点同目录取 bank.json */
+  async fetchBlob(){
+    const r = await fetch('bank.json?t=' + Date.now(), {cache:'no-store'});
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    return r.json();
+  }
+};
 </script>
 
 <!-- 选择页 -->
@@ -153,6 +287,7 @@ const QUESTIONS = [
     <button class="btn" id="goJoin" style="width:100%">进入</button>
   </div>
   <button class="btn ghost" id="goHost">我是老师，开一场</button>
+  <button class="dim" id="goEdit" style="font-size:13px;text-decoration:underline">编辑题库</button>
 </div>
 
 <!-- 主持视图 -->
@@ -171,11 +306,33 @@ const QUESTIONS = [
         <div class="joinUrl" id="hUrl"></div>
       </div>
       <div class="card">
+        <div id="bankBox" style="margin-bottom:14px">
+          <div class="row">
+            <div class="dim" style="font-size:14px">题库</div>
+            <span id="bankStatus" style="font-size:14px">正在读取 bank.json…</span>
+          </div>
+          <div class="row" id="bankUnlock" style="margin-top:8px">
+            <input id="bankPass" type="password" placeholder="题库密码" autocomplete="off" class="pw">
+            <button class="btn ghost sm" id="bankGo">解锁</button>
+            <label class="dim" style="font-size:13px"><input type="checkbox" id="bankRemember" checked> 这台电脑记住密码</label>
+            <input type="file" id="bankFile" accept=".json" class="hide">
+            <button class="btn ghost sm hide" id="bankPick">从本机选择题库文件</button>
+          </div>
+        </div>
+        <div class="row" style="margin-bottom:14px">
+          <div class="dim" style="font-size:14px">本节课用哪套题</div>
+          <select id="hSet"></select>
+        </div>
         <div class="row">
           <h2 style="font-size:24px">已加入 <span id="hCount">0</span> 人</h2>
           <div class="spacer"></div>
           <button class="btn ghost" id="hTest">测试连接</button>
           <button class="btn" id="hStart" disabled>开始（<span id="hQn">0</span> 题）</button>
+        </div>
+        <div class="row" style="margin-top:12px">
+          <span class="dim" id="hLogInfo" style="font-size:14px"></span>
+          <div class="spacer"></div>
+          <button class="btn ghost" id="hDl1" style="padding:9px 16px;font-size:14px">下载学期记录 (CSV)</button>
         </div>
         <div id="roster"></div>
         <div class="dim" style="margin-top:16px;font-size:14px">
@@ -218,6 +375,7 @@ const QUESTIONS = [
     <h2 style="font-size:30px;margin-bottom:18px">排行榜</h2>
     <table class="lb" id="hLbT"></table>
     <div class="row" style="margin-top:26px">
+      <button class="btn ghost" id="hEnd">提前结束，看总结</button>
       <div class="spacer"></div>
       <button class="btn" id="hNext">下一题</button>
     </div>
@@ -226,10 +384,56 @@ const QUESTIONS = [
   <div id="hFinal" class="hide">
     <h2 style="font-size:34px;text-align:center">最终成绩</h2>
     <div class="podium" id="hPod"></div>
+    <div id="hWeak"></div>
     <table class="lb" id="hFinT"></table>
     <div class="row" style="margin-top:26px">
+      <span class="dim" id="hLogInfo2" style="font-size:14px"></span>
       <div class="spacer"></div>
+      <button class="btn ghost" id="hDl2">下载学期记录 (CSV)</button>
       <button class="btn ghost" id="hAgain">再来一局</button>
+    </div>
+  </div>
+</div>
+
+<!-- 题库编辑页 -->
+<div class="wrap hide" id="edit">
+  <div class="row" style="margin-bottom:14px">
+    <h1 style="font-size:26px">题库编辑</h1>
+    <div class="spacer"></div>
+    <button class="btn ghost sm" id="edToHost">回老师页面</button>
+  </div>
+  <div class="editGrid">
+    <div>
+      <div class="row" style="margin-bottom:8px">
+        <button class="btn ghost sm" id="edLoadJson">读入题库文件 (bank.json)</button>
+        <button class="btn ghost sm" id="edLoadTxt">读入纯文本 (.txt)</button>
+        <input type="file" id="edFileJson" accept=".json" class="hide">
+        <input type="file" id="edFileTxt" accept=".txt,.md" class="hide">
+      </div>
+      <textarea id="edText" spellcheck="false" placeholder="## Week 9: 主题
+
+Q: 题干
+A. 选项
+B. 正确选项 *
+C. 选项
+T: 25"></textarea>
+    </div>
+    <div>
+      <div class="card" id="edSummary" style="margin-bottom:12px"></div>
+      <div class="card">
+        <div class="dim" style="font-size:14px;margin-bottom:8px">密码（上课解锁时用同一个）</div>
+        <input id="edPass" type="password" autocomplete="off" placeholder="建议用一句话" class="pw" style="width:100%">
+        <input id="edPass2" type="password" autocomplete="off" placeholder="再输一遍" class="pw" style="width:100%;margin-top:8px">
+        <div class="row" style="margin-top:12px">
+          <button class="btn" id="edSave">下载题库文件 bank.json</button>
+          <button class="btn ghost sm" id="edSaveTxt">下载纯文本备份</button>
+        </div>
+        <div id="edMsg" style="font-size:13px;margin-top:10px"></div>
+      </div>
+      <div class="dim" style="font-size:13px;margin-top:12px;line-height:1.7">
+        <code>## 套题名</code> 开一套　<code>Q:</code> 开一题　<code>A.</code> 到 <code>D.</code> 是选项，正确的后面加 <code>*</code><br>
+        <code>T: 25</code> 限时秒数（可省）　调查题写一行 <code>survey</code>　<code>#</code> 开头是注释
+      </div>
     </div>
   </div>
 </div>
@@ -413,18 +617,31 @@ function scoreFor(correct, elapsedMs, limitSec){
    3. 主持端
    ============================================================ */
 const Host = {
-  code:null, epoch:0, phase:'lobby', qi:-1,
+  code:null, epoch:0, phase:'lobby', qi:-1, setName:null,
   players:new Map(),          // cid -> {nick, score, ans:{}}
   qStart:0, timer:null, dist:[0,0,0,0], lastGain:{},
 
+  qs(){ return QUESTION_SETS[this.setName] || []; },
+
+  /* 一周三个班，每班是不同的学生。上一场如果已经过了 3 小时，
+     分数和名单自动清空，只沿用房间号（这样放在 PPT 里的二维码不用换）。 */
+  STALE_MS: 3*60*60*1000,
+
   boot(){
-    const saved = JSON.parse(localStorage.getItem('cq_host') || 'null');
+    let saved = JSON.parse(localStorage.getItem('cq_host') || 'null');
+    const stale = !!(saved && saved.savedAt && Date.now() - saved.savedAt > this.STALE_MS);
+    if (stale){
+      saved = {code: saved.code};               // 只留房间号
+      $('hStatus').textContent = '上一场已超过 3 小时，名单和分数已自动清空';
+    }
     this.code  = (saved && saved.code) || randCode(4);
     this.epoch = (saved && saved.epoch) || Date.now();
+    this.refreshLogInfo();
+
+    this.populateSets(saved);      // 先放演示题，题库解锁后替换
+    this.loadBank(saved);
 
     $('hCode').textContent = this.code;
-    $('hQn').textContent = QUESTIONS.length;
-    $('hQt').textContent = QUESTIONS.length;
 
     const url = location.origin + location.pathname + '#j=' + this.code;
     $('hUrl').textContent = url;
@@ -448,19 +665,80 @@ const Host = {
     this.save();          // 立刻存房间号，老师中途刷新不会换码
   },
 
+  /* 题库下拉框：默认第一套；上次选过且还存在就沿用 */
+  populateSets(saved){
+    const names = Object.keys(QUESTION_SETS);
+    $('hSet').innerHTML = names.map(n => `<option>${esc(n)}</option>`).join('');
+    const want = saved && saved.setName;
+    this.setName = names.includes(want) ? want : names[0];
+    $('hSet').value = this.setName;
+    this.applySet();
+  },
+
+  /* 从站点同目录取 bank.json；没有就允许从本机选文件 */
+  async loadBank(saved){
+    const st = $('bankStatus');
+    try { this.bankBlob = await Bank.fetchBlob(); }
+    catch(e){
+      this.bankBlob = null;
+      st.textContent = '站点上没有 bank.json。可以从本机选择题库文件，或先用演示题';
+      $('bankPick').classList.remove('hide');
+    }
+    if (this.bankBlob){
+      st.textContent = '已找到 bank.json，输入密码解锁';
+      const remembered = localStorage.getItem('cq_pass');
+      if (remembered){ $('bankPass').value = remembered; this.unlock(saved); }
+    }
+    $('bankGo').onclick = () => this.unlock(saved);
+    $('bankPass').addEventListener('keydown', e => { if (e.key === 'Enter') this.unlock(saved); });
+    $('bankPick').onclick = () => $('bankFile').click();
+    $('bankFile').onchange = async () => {
+      const f = $('bankFile').files[0]; if (!f) return;
+      try { this.bankBlob = JSON.parse(await f.text()); st.textContent = '已读取本机题库文件，输入密码解锁'; }
+      catch(e){ st.textContent = '这个文件不是题库文件'; }
+    };
+  },
+
+  async unlock(saved){
+    const st = $('bankStatus'), pass = $('bankPass').value;
+    if (!this.bankBlob) return st.textContent = '还没有题库文件';
+    if (!pass) return $('bankPass').focus();
+    st.textContent = '解锁中…';
+    let text;
+    try { text = await Bank.decrypt(this.bankBlob, pass); }
+    catch(e){ st.textContent = '密码不对'; localStorage.removeItem('cq_pass'); return; }
+    const r = Bank.parse(text);
+    if (r.errors.length){ st.textContent = '题库有格式问题：' + r.errors[0]; return; }
+    QUESTION_SETS = r.sets;
+    this.populateSets(saved);
+    if ($('bankRemember').checked) localStorage.setItem('cq_pass', pass); else localStorage.removeItem('cq_pass');
+    st.textContent = `已解锁：${Object.keys(r.sets).length} 套题，共 ${r.count} 道`;
+    $('bankUnlock').classList.add('hide');
+  },
+
+  applySet(){
+    $('hQn').textContent = this.qs().length;
+    $('hQt').textContent = this.qs().length;
+    $('hStart').disabled = this.players.size === 0 || this.qs().length === 0;
+  },
+
   save(){
     if (this._wiped) return;      // 重开一局时别让 beforeunload 把旧分数写回去
     localStorage.setItem('cq_host', JSON.stringify({
-      code:this.code, epoch:this.epoch,
+      code:this.code, epoch:this.epoch, setName:this.setName, savedAt:Date.now(),
       players:[...this.players].map(([cid,p]) => ({cid, nick:p.nick, score:p.score, ans:p.ans}))
     }));
   },
 
   wire(){
-    $('hStart').onclick = () => this.nextQuestion();
+    $('hSet').onchange  = () => { this.setName = $('hSet').value; this.applySet(); this.save(); };
+    $('hStart').onclick = () => { $('hSet').disabled = true; this.nextQuestion(); };
     $('hNext').onclick  = () => this.nextQuestion();
     $('hSkip').onclick  = () => this.reveal();
     $('hBoard').onclick = () => this.showBoard();
+    $('hEnd').onclick   = () => { if (confirm('不做剩下的题，直接结算？')) this.finish(); };
+    $('hDl1').onclick   = () => this.downloadLog();
+    $('hDl2').onclick   = () => this.downloadLog();
     $('hTest').onclick  = () => banner(Net.ok() ? '中继连接正常，可以上课' : '还没连上，等几秒再点',
                                        Net.ok() ? 'ok' : 'bad', 2600);
     $('hAgain').onclick = () => {
@@ -498,22 +776,23 @@ const Host = {
     const p = this.players.get(d.cid);
     if (!p || p.ans[this.qi] !== undefined) return;      // 一题只认第一次
 
-    const q = QUESTIONS[this.qi];
+    const q = this.qs()[this.qi];
     const elapsed = Date.now() - this.qStart;
     if (elapsed > q.seconds*1000 + 1500) return;         // 1.5 秒宽限，超了不算
 
     const choice = Number(d.choice);
     if (!(choice >= 0 && choice < q.options.length)) return;
 
-    const gain = scoreFor(choice === q.answer, elapsed, q.seconds);
+    // 调查题不计分
+    const gain = q.survey ? 0 : scoreFor(choice === q.answer, elapsed, q.seconds);
     p.ans[this.qi] = choice;
     p.score += gain;
     this.lastGain[d.cid] = gain;
     this.dist[choice]++;
 
+    // 答题期间只显示已作答人数，不显示各选项分布，免得没答的人跟风
     $('hAns').textContent = [...this.players.values()]
       .filter(x => x.ans[this.qi] !== undefined).length;
-    this.paintDist();
 
     // 全答完就提前公布
     if ([...this.players.values()].every(x => x.ans[this.qi] !== undefined)) {
@@ -524,7 +803,7 @@ const Host = {
   renderRoster(){
     $('hCount').textContent = this.players.size;
     $('hTot').textContent   = this.players.size;
-    $('hStart').disabled    = this.players.size === 0;
+    $('hStart').disabled    = this.players.size === 0 || this.qs().length === 0;
     const box = $('roster');
     box.innerHTML = [...this.players.values()]
       .map(p => `<div class="chip">${esc(p.nick)}</div>`).join('');
@@ -532,18 +811,19 @@ const Host = {
 
   nextQuestion(){
     this.qi++;
-    if (this.qi >= QUESTIONS.length) return this.finish();
-    const q = QUESTIONS[this.qi];
+    if (this.qi >= this.qs().length) return this.finish();
+    const q = this.qs()[this.qi];
     this.phase = 'question'; this.qStart = Date.now();
     this.dist = [0,0,0,0]; this.lastGain = {};
 
     hide('hLobby','hReveal','hLb','hFinal'); show('hQuiz');
     $('hQi').textContent = this.qi + 1;
-    $('hQ').textContent  = q.q;
+    $('hQ').textContent  = (q.survey ? '【调查】' : '') + q.q;
     $('hAns').textContent = '0';
+    // 出题阶段的选项不带计数条，分布只在公布时才显示
     $('hOpts').innerHTML = q.options.map((o,i) =>
       `<div class="opt o${i}" data-i="${i}"><div class="tag">${LETTERS[i]}</div>
-       <div>${esc(o)}</div><div class="cnt"></div><div class="bar"></div></div>`).join('');
+       <div>${esc(o)}</div></div>`).join('');
 
     this.publishState();
 
@@ -558,37 +838,45 @@ const Host = {
     this.save();
   },
 
-  paintDist(){
-    const total = Math.max(1, this.dist.reduce((a,b) => a+b, 0));
-    [...$('hOpts').children].forEach((el,i) => {
-      el.querySelector('.cnt').textContent = this.dist[i] || '';
-      el.querySelector('.bar').style.width = (this.dist[i]/total*100) + '%';
-    });
-  },
-
   reveal(){
     if (this.phase !== 'question') return;
     clearInterval(this.timer);
     this.phase = 'reveal';
-    const q = QUESTIONS[this.qi];
+    const q = this.qs()[this.qi];
     const total = Math.max(1, this.dist.reduce((a,b) => a+b, 0));
 
     hide('hQuiz'); show('hReveal');
     $('hQ2').textContent = q.q;
-    $('hRevTitle').textContent = `正确答案：${LETTERS[q.answer]}`;
-    $('hOpts2').innerHTML = q.options.map((o,i) =>
-      `<div class="opt o${i} ${i===q.answer?'':'faded'}">
-         <div class="tag">${LETTERS[i]}</div><div>${esc(o)}</div>
-         <div class="cnt">${this.dist[i]} 人</div>
-         ${i===q.answer?'<div class="tick">✔</div>':''}
-         <div class="bar" style="width:${this.dist[i]/total*100}%"></div></div>`).join('');
+    if (q.survey){
+      // 调查题：全部选项亮着，只看分布，没有对勾
+      $('hRevTitle').textContent = `调查结果（${total} 人作答）`;
+      $('hOpts2').innerHTML = q.options.map((o,i) =>
+        `<div class="opt o${i}">
+           <div class="tag">${LETTERS[i]}</div><div>${esc(o)}</div>
+           <div class="cnt">${this.dist[i]} 人 · ${Math.round(this.dist[i]/total*100)}%</div>
+           <div class="bar" style="width:${this.dist[i]/total*100}%"></div></div>`).join('');
+      $('hBoard').textContent = this.qi >= this.qs().length-1 ? '看最终成绩' : '下一题';
+    } else {
+      $('hRevTitle').textContent = `正确答案：${LETTERS[q.answer]}`;
+      $('hOpts2').innerHTML = q.options.map((o,i) =>
+        `<div class="opt o${i} ${i===q.answer?'':'faded'}">
+           <div class="tag">${LETTERS[i]}</div><div>${esc(o)}</div>
+           <div class="cnt">${this.dist[i]} 人</div>
+           ${i===q.answer?'<div class="tick">✔</div>':''}
+           <div class="bar" style="width:${this.dist[i]/total*100}%"></div></div>`).join('');
+      $('hBoard').textContent = '看排行榜';
+    }
 
     // 先发分数再发状态，学生那边才不会先闪一下 0 分
     this._publishBoardNow(); this.publishState(); this.save();
   },
 
-  showBoard(){ hide('hReveal'); show('hLb'); $('hLbT').innerHTML = this.boardRows(10);
-    $('hNext').textContent = this.qi >= QUESTIONS.length-1 ? '看最终成绩' : '下一题'; },
+  showBoard(){
+    // 调查题公布完直接进下一题，不看排行榜（分数没变）
+    if (this.qs()[this.qi] && this.qs()[this.qi].survey) return this.nextQuestion();
+    hide('hReveal'); show('hLb'); $('hLbT').innerHTML = this.boardRows(10);
+    $('hNext').textContent = this.qi >= this.qs().length-1 ? '看最终成绩' : '下一题';
+  },
 
   ranked(){ return [...this.players.values()].sort((a,b) => b.score - a.score); },
 
@@ -599,9 +887,116 @@ const Host = {
       || '<tr><td class="dim" style="text-align:center;padding:26px">还没有人得分</td></tr>';
   },
 
+  /* 本场每道题的作答统计。只统计已经出过的题（提前结束时后面的题不算）。
+     没作答按答错算，但分开记录。调查题记分布，不记对错。 */
+  qStats(){
+    const n = this.players.size;
+    return this.qs().map((q,i) => {
+      if (i > this.qi) return null;
+      const dist = new Array(q.options.length).fill(0);
+      let wrong = 0, none = 0;
+      for (const p of this.players.values()){
+        const a = p.ans[i];
+        if (a === undefined) none++;
+        else { dist[a]++; if (!q.survey && a !== q.answer) wrong++; }
+      }
+      const answered = n - none;
+      return {i, q, dist, wrong, none, answered,
+              rate: q.survey ? null : (n ? (wrong + none)/n : 0)};
+    }).filter(Boolean);
+  },
+
+  weakSpots(){
+    const rows = this.qStats().filter(r => !r.q.survey && r.wrong + r.none > 0);
+    // 错误率高的在前；同率看答错人数；再同看题号
+    rows.sort((a,b) => b.rate - a.rate || b.wrong - a.wrong || a.i - b.i);
+    return rows.slice(0, 2);
+  },
+
+  /* ---- 学期记录：存在这台电脑的浏览器里，随时可下载 CSV ---- */
+  readLog(){ try { return JSON.parse(localStorage.getItem('cq_log') || '[]'); } catch(e){ return []; } },
+
+  refreshLogInfo(){
+    const n = this.readLog().length;
+    const t = n ? `这台电脑上已记录 ${n} 场` : '还没有记录';
+    $('hLogInfo').textContent = t; $('hLogInfo2').textContent = t;
+  },
+
+  logSession(){
+    if (this._logged || this.players.size === 0) return;
+    this._logged = true;
+    const d = new Date(), pad = x => String(x).padStart(2,'0');
+    const when = `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    const stats = this.qStats();
+    const ranked = stats.filter(r => !r.q.survey).slice().sort((a,b) => b.rate - a.rate || b.wrong - a.wrong || a.i - b.i);
+    const rankOf = {}; ranked.forEach((r,k) => rankOf[r.i] = k + 1);
+    const rec = {
+      when, set:this.setName, code:this.code, players:this.players.size,
+      questions: stats.map(r => ({
+        n:r.i+1, q:r.q.q, survey:!!r.q.survey,
+        correct: r.q.survey ? '' : LETTERS[r.q.answer],
+        right: r.q.survey ? '' : r.answered - r.wrong,
+        wrong:r.wrong, none:r.none, answered:r.answered,
+        rate: r.rate === null ? '' : Math.round(r.rate*100),
+        rank: rankOf[r.i] || '',
+        dist:r.dist
+      }))
+    };
+    const log = this.readLog(); log.push(rec);
+    localStorage.setItem('cq_log', JSON.stringify(log));
+    this.refreshLogInfo();
+  },
+
+  buildCsv(log){
+    const head = ['日期时间','题库','房间号','参与人数','题号','题干','类型','正确答案',
+                  '答对人数','答错人数','未作答','已作答','错误率%','本场错误率排名','选A','选B','选C','选D'];
+    const rows = [head];
+    log.forEach(s => s.questions.forEach(q => rows.push([
+      s.when, s.set, s.code, s.players, q.n, q.q, q.survey ? '调查' : '计分', q.correct,
+      q.right, q.wrong, q.none, q.answered, q.rate, q.rank,
+      q.dist[0] ?? '', q.dist[1] ?? '', q.dist[2] ?? '', q.dist[3] ?? ''
+    ])));
+    // 开头加 BOM，Excel 打开中文才不会乱码
+    return '\uFEFF' + rows.map(r => r.map(v => '"' + String(v ?? '').replace(/"/g,'""') + '"').join(',')).join('\r\n');
+  },
+
+  downloadLog(){
+    const log = this.readLog();
+    if (!log.length) return alert('还没有记录。每场结算后会自动记一条。');
+    const csv = this.buildCsv(log);
+    const blob = new Blob([csv], {type:'text/csv;charset=utf-8'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'quiz_log_' + new Date().toISOString().slice(0,10) + '.csv';
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  },
+
+  renderWeak(){
+    const n = this.players.size, weak = this.weakSpots();
+    if (!weak.length){
+      $('hWeak').innerHTML = this.qs().some(q => !q.survey)
+        ? `<div class="card dim" style="text-align:center">每道题都全班答对，没有需要再讲的</div>` : '';
+      return;
+    }
+    $('hWeak').innerHTML = `<h3>错得最多的 ${weak.length} 题</h3>` + weak.map(r => {
+      const answered = Math.max(1, r.dist.reduce((a,b) => a+b, 0));
+      return `<div class="weak">
+        <div class="wq">第 ${r.i+1} 题　${esc(r.q.q)}</div>
+        <div class="wmeta">错误率 <b>${Math.round(r.rate*100)}%</b>　·　答错 ${r.wrong} 人　·　未作答 ${r.none} 人　·　共 ${n} 人</div>
+        <div class="wopts">${r.q.options.map((o,k) =>
+          `<div class="wopt ${k===r.q.answer?'ok':''}"><span class="tag">${LETTERS[k]}</span>
+           <span>${esc(o)}${k===r.q.answer?' ✔':''}</span><span class="wc">${r.dist[k]} 人</span>
+           <div class="bar" style="width:${r.dist[k]/answered*100}%"></div></div>`).join('')}</div>
+      </div>`;
+    }).join('');
+  },
+
   finish(){
     this.phase = 'final'; clearInterval(this.timer);
     hide('hQuiz','hReveal','hLb','hLobby'); show('hFinal');
+    this.logSession();
+    this.renderWeak();
     const top = this.ranked().slice(0,3);
     const H = [200,150,115], ORDER = [1,0,2];   // H 按名次：第一名最高；ORDER 是左中右的摆法
     $('hPod').innerHTML = ORDER.filter(i => top[i]).map(i =>
@@ -613,13 +1008,14 @@ const Host = {
   },
 
   publishState(){
-    const q = this.phase === 'question' || this.phase === 'reveal' ? QUESTIONS[this.qi] : null;
+    const q = this.phase === 'question' || this.phase === 'reveal' ? this.qs()[this.qi] : null;
     Net.pub('state', {
-      epoch:this.epoch, phase:this.phase, qIndex:this.qi, total:QUESTIONS.length,
+      epoch:this.epoch, phase:this.phase, qIndex:this.qi, total:this.qs().length,
       question: q ? q.q : null,
       options:  q ? q.options : null,
       seconds:  q ? q.seconds : null,
-      answer:   this.phase === 'reveal' ? q.answer : null,
+      survey:   !!(q && q.survey),
+      answer:   (this.phase === 'reveal' && !q.survey) ? q.answer : null,
       startedAt:this.qStart, hostNow:Date.now()
     }, true);
   },
@@ -700,7 +1096,7 @@ const Stu = {
       if (this.answeredQ === s.qIndex){ show('sDone'); return; }
       show('sQuiz');
       $('sQi').textContent = s.qIndex + 1;
-      $('sQ').textContent  = s.question;
+      $('sQ').textContent  = (s.survey ? '【调查】' : '') + s.question;
       $('sOpts').innerHTML = s.options.map((o,i) =>
         `<div class="sopt o${i}" data-i="${i}"><div class="tag">${LETTERS[i]}</div><div>${esc(o)}</div></div>`).join('');
       [...$('sOpts').children].forEach(el => el.onclick = () => this.answer(+el.dataset.i));
@@ -720,13 +1116,21 @@ const Stu = {
       clearInterval(this.timer);
       show('sRes');
       const my   = this.answeredQ === s.qIndex ? this.myChoice : null;
+      const me = this.me(), r = this.myRank();
+      if (s.survey){
+        // 调查题：只确认收到，不显示对错和分数
+        $('sResIcon').textContent = my === null ? '😴' : '🙏';
+        $('sResMsg').textContent  = my === null ? '这题没作答' : '已收到，谢谢';
+        $('sPts').textContent = '';
+        $('sRank').textContent = '调查题不计分，看大屏幕上的分布';
+        return;
+      }
       const gain = this.board && this.board.gains ? (this.board.gains[this.cid] || 0) : 0;
       const right = my !== null && my === s.answer;
       $('sResIcon').textContent = my === null ? '😴' : (right ? '🎉' : '💥');
       $('sResMsg').textContent  = my === null ? '这题没作答'
                                  : (right ? '答对了' : `答错了，正确答案是 ${LETTERS[s.answer]}`);
       $('sPts').textContent = (gain > 0 ? '+' : '') + gain;
-      const me = this.me(), r = this.myRank();
       $('sRank').textContent = me && r ? `总分 ${me.score}　第 ${r.rank} / ${r.of} 名` : '';
       return;
     }
@@ -751,17 +1155,83 @@ const Stu = {
 };
 
 /* ============================================================
-   5. 路由
+   5. 题库编辑页
+   ============================================================ */
+function download(name, text, type){
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([text], {type})); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+
+const Editor = {
+  boot(){
+    const draft = localStorage.getItem('cq_edit_draft');
+    if (draft) $('edText').value = draft;
+    $('edText').addEventListener('input', () => { this.preview(); localStorage.setItem('cq_edit_draft', $('edText').value); });
+    $('edToHost').onclick = () => { location.hash = '#host'; location.reload(); };
+    $('edLoadJson').onclick = () => $('edFileJson').click();
+    $('edLoadTxt').onclick  = () => $('edFileTxt').click();
+    $('edFileTxt').onchange = async () => {
+      const f = $('edFileTxt').files[0]; if (!f) return;
+      $('edText').value = await f.text(); this.preview(); this.msg('已读入纯文本', true);
+    };
+    $('edFileJson').onchange = async () => {
+      const f = $('edFileJson').files[0]; if (!f) return;
+      const pass = $('edPass').value || prompt('这个题库文件的密码：') || '';
+      try {
+        const blob = JSON.parse(await f.text());
+        $('edText').value = await Bank.decrypt(blob, pass);
+        $('edPass').value = pass; $('edPass2').value = pass;
+        this.msg('已读入并解密，可以改了', true);
+      } catch(e){ this.msg('读不出来：文件不对或密码不对', false); }
+      this.preview();
+    };
+    $('edSave').onclick    = () => this.save();
+    $('edSaveTxt').onclick = () => download('bank.txt', $('edText').value, 'text/plain;charset=utf-8');
+    this.preview();
+  },
+
+  msg(t, ok){ const m = $('edMsg'); m.textContent = t; m.className = ok ? 'edOk' : 'edErr'; },
+
+  preview(){
+    const r = Bank.parse($('edText').value);
+    const rows = Object.entries(r.sets).map(([n,qs]) =>
+      `<div>${esc(n)}　<span class="dim">${qs.length} 题${qs.some(q => q.survey) ? '，含调查' : ''}</span></div>`).join('');
+    $('edSummary').innerHTML =
+      `<div style="font-weight:700;margin-bottom:6px">${Object.keys(r.sets).length} 套 / ${r.count} 题</div>${rows}` +
+      (r.errors.length
+        ? `<div class="edErr">${r.errors.slice(0,8).map(esc).join('<br>')}${r.errors.length > 8 ? '<br>…' : ''}</div>`
+        : `<div class="edOk" style="margin-top:6px">格式没问题</div>`);
+  },
+
+  async save(){
+    const r = Bank.parse($('edText').value);
+    if (r.errors.length) return this.msg('先把右上角列出的格式问题改掉', false);
+    const p1 = $('edPass').value, p2 = $('edPass2').value;
+    if (p1.length < 8) return this.msg('密码至少 8 个字符，建议用一句话', false);
+    if (p1 !== p2) return this.msg('两次密码不一样', false);
+    this.msg('加密中…', true);
+    const blob = await Bank.encrypt($('edText').value, p1);
+    download('bank.json', JSON.stringify(blob), 'application/json');
+    this.msg(`已生成 bank.json（${Object.keys(r.sets).length} 套 / ${r.count} 题）。把它拖到 GitHub 仓库覆盖上传。`, true);
+  }
+};
+
+/* ============================================================
+   6. 路由
    ============================================================ */
 function route(){
   const h = location.hash;
-  hide('chooser','host','stu');
+  hide('chooser','host','stu','edit');
   if (h === '#host'){ show('host'); Host.boot(); return; }
+  if (h === '#edit'){ show('edit'); Editor.boot(); return; }
   const m = h.match(/^#j=([A-Za-z0-9]{4})$/);
   if (m){ show('stu'); Stu.boot(m[1].toUpperCase()); return; }
 
   show('chooser');
   $('goHost').onclick = () => { location.hash = '#host'; location.reload(); };
+  $('goEdit').onclick = () => { location.hash = '#edit'; location.reload(); };
   $('goJoin').onclick = () => {
     const c = $('joinCode').value.trim().toUpperCase();
     if (c.length !== 4) return $('joinCode').focus();
