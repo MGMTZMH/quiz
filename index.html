@@ -125,6 +125,8 @@ input.pw{font:inherit;font-size:15px;padding:9px 12px;border-radius:10px;border:
 .edOk{color:#7fd8a5;font-size:14px}
 #edit code{background:#262b3a;padding:1px 5px;border-radius:5px}
 
+#hostYield{position:fixed;inset:0;background:var(--bg);z-index:40;padding:20px}
+
 /* ---------- student ---------- */
 #stu{gap:16px;justify-content:center}
 #stu .top{display:flex;align-items:center;gap:10px;font-size:14px;color:var(--dim)}
@@ -147,6 +149,17 @@ input.pw{font:inherit;font-size:15px;padding:9px 12px;border-radius:10px;border:
 <body>
 
 <div id="banner"></div>
+<div id="hostYield" class="hide">
+  <div class="card" style="max-width:520px;margin:18vh auto 0;text-align:center">
+    <div class="big">🖥️🖥️</div>
+    <h2 style="font-size:22px;margin-bottom:10px">这个房间已经有另一个老师页面在控制</h2>
+    <div class="dim" style="font-size:15px;line-height:1.6;margin-bottom:18px">
+      可能是另一个标签页、另一台设备，或嵌在 PPT 里的那一份。同一个房间只能有一个老师页面在跑，
+      否则学生会收到互相打架的消息。关掉另一个，或者点下面接管。
+    </div>
+    <button class="btn" id="hTakeover">在这里接管房间</button>
+  </div>
+</div>
 
 <!-- ============ 题库 ============
      题目不再写在这个文件里。它们加密存放在同目录的 bank.json，
@@ -658,9 +671,16 @@ const Host = {
       this.renderRoster();
     }
 
-    Net.connect(this.code, ['join','answer'],
+    // 身份存在 sessionStorage：本标签页刷新后还是同一个身份，不会把自己刷新前的心跳当成别人；
+    // 另一个标签页或另一台设备则是不同身份
+    this.instanceId = sessionStorage.getItem('cq_host_inst') || randCode(8);
+    sessionStorage.setItem('cq_host_inst', this.instanceId);
+    this.bootAt = +sessionStorage.getItem('cq_host_boot') || Date.now();
+    sessionStorage.setItem('cq_host_boot', String(this.bootAt));
+    this.yielded = false;
+    Net.connect(this.code, ['join','answer','hostbeat'],
       (leaf, d) => this.onMsg(leaf, d),
-      () => { this.publishState(); this.publishBoard(); });
+      () => { if (!this.yielded){ this.beat(); this.publishState(); this.publishBoard(); } });
     this.wire();
     this.save();          // 立刻存房间号，老师中途刷新不会换码
   },
@@ -737,6 +757,8 @@ const Host = {
     $('hSkip').onclick  = () => this.closeQuestion(this.CLOSING_MS);
     $('hBoard').onclick = () => this.showBoard();
     $('hEnd').onclick   = () => { if (confirm('不做剩下的题，直接结算？')) this.finish(); };
+    $('hTakeover').onclick = () => this.takeover();
+    this.startBeating();
     $('hDl1').onclick   = () => this.downloadLog();
     $('hDl2').onclick   = () => this.downloadLog();
     $('hTest').onclick  = () => banner(Net.ok() ? '中继连接正常，可以上课' : '还没连上，等几秒再点',
@@ -752,8 +774,53 @@ const Host = {
   },
 
   onMsg(leaf, d){
+    if (leaf === 'hostbeat') return this.onBeat(d);
+    if (this.yielded) return;                       // 让位期间什么都不处理
     if (leaf === 'join')   return this.onJoin(d);
     if (leaf === 'answer') return this.onAnswer(d);
+  },
+
+  /* ---- 同一房间只允许一个老师页面 ----
+     每个老师页面每 5 秒往 hostbeat 发一条驻留心跳。先开的那个说了算；后开的看到别人的
+     心跳就让位，只显示一块提示。点"接管"会发一条带 takeover 的心跳，另一边收到就让位。 */
+  BEAT_MS: 5000, BEAT_DEAD_MS: 16000,
+
+  beat(extra){
+    Net.pub('hostbeat', {id:this.instanceId, at:this.bootAt, t:Date.now(), ...(extra||{})}, true);
+  },
+
+  onBeat(d){
+    if (!d || !d.id || d.id === this.instanceId) return;
+    const alive = Date.now() - (d.t || 0) < this.BEAT_DEAD_MS;
+    if (!alive) return;                              // 对方页面已经关了，剩下的是旧心跳
+    if (d.takeover || d.at < this.bootAt) this.yieldTo(d);
+  },
+
+  yieldTo(d){
+    if (this.yielded) return;
+    this.yielded = true;
+    clearInterval(this.timer); clearInterval(this._beatTimer);
+    $('hostYield').classList.remove('hide');
+  },
+
+  takeover(){
+    this.yielded = false; this.bootAt = Date.now();
+    sessionStorage.setItem('cq_host_boot', String(this.bootAt));
+    $('hostYield').classList.add('hide');
+    // 同一台电脑上接管：把另一个标签页存下的名单和分数接过来
+    const saved = JSON.parse(localStorage.getItem('cq_host') || 'null');
+    if (saved && saved.players){
+      saved.players.forEach(x => { if (!this.players.has(x.cid)) this.players.set(x.cid, {nick:x.nick, score:x.score, ans:x.ans||{}}); });
+      this.renderRoster();
+    }
+    this.beat({takeover:true});
+    this.startBeating();
+    this.publishState(); this.publishBoard();
+  },
+
+  startBeating(){
+    clearInterval(this._beatTimer);
+    this._beatTimer = setInterval(() => { if (!this.yielded && Net.ok()) this.beat(); }, this.BEAT_MS);
   },
 
   onJoin(d){
@@ -1035,6 +1102,7 @@ const Host = {
   },
 
   publishState(){
+    if (this.yielded) return;
     const q = ['question','closing','reveal'].includes(this.phase) ? this.qs()[this.qi] : null;
     Net.pub('state', {
       epoch:this.epoch, phase:this.phase, qIndex:this.qi, total:this.qs().length,
@@ -1054,6 +1122,7 @@ const Host = {
   },
 
   _publishBoardNow(){
+    if (this.yielded) return;
     const all = this.ranked();
     Net.pub('board', {
       epoch:this.epoch, qIndex:this.qi,
@@ -1159,10 +1228,18 @@ const Stu = {
         $('sRank').textContent = '调查题不计分，看大屏幕上的分布';
         return;
       }
-      const gains = (this.board && this.board.qIndex === s.qIndex && this.board.gains) || {};
+      const boardFresh = !!(this.board && this.board.qIndex === s.qIndex && this.board.gains);
+      const gains = boardFresh ? this.board.gains : {};
       const received = this.cid in gains;
       const gain = gains[this.cid] || 0;
       const right = my !== null && my === s.answer;
+      if (my !== null && !boardFresh){
+        // 分数板还没到（或到的是别的题的），先别下结论
+        $('sResIcon').textContent = '⏳';
+        $('sResMsg').textContent  = '正在同步分数…';
+        $('sPts').textContent = ''; $('sRank').textContent = '';
+        return;
+      }
       if (my !== null && !received){
         // 学生点了，但老师端没收到（网络太慢或到得太晚）。说清楚，别让人以为答对了没给分
         $('sResIcon').textContent = '📡';
