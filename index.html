@@ -340,7 +340,8 @@ const Bank = {
           <h2 style="font-size:24px">已加入 <span id="hCount">0</span> 人</h2>
           <div class="spacer"></div>
           <button class="btn ghost" id="hTest">测试连接</button>
-          <button class="btn" id="hStart" disabled>开始（<span id="hQn">0</span> 题）</button>
+          <button class="btn ghost hide" id="hRestart">从头开始</button>
+          <button class="btn" id="hStart" disabled>开始</button>
         </div>
         <div class="row" style="margin-top:12px">
           <span class="dim" id="hLogInfo" style="font-size:14px"></span>
@@ -560,8 +561,11 @@ const ROOT = 'cq1';
 const Net = {
   client:null, code:null, onMsg:null, onReady:null, topics:[], brokerIdx:0, everConnected:false,
 
-  async connect(code, topics, onMsg, onReady){
+  async connect(code, topics, onMsg, onReady, startIdx){
     this.code = code; this.topics = topics; this.onMsg = onMsg; this.onReady = onReady;
+    // 二维码里带着老师用的是哪条线路（b=N），学生从同一条开始连，两边才在同一个中继上
+    if (Number.isInteger(startIdx) && startIdx >= 0 && startIdx < BROKERS.length) this.brokerIdx = startIdx;
+    this.attempts = 0;
     await loadScript([
       'https://cdnjs.cloudflare.com/ajax/libs/mqtt/5.10.1/mqtt.min.js',
       'https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js'
@@ -580,8 +584,9 @@ const Net = {
 
     // 首次连不上就切备用中继
     const failover = setTimeout(() => {
-      if (!this.everConnected && this.brokerIdx < BROKERS.length - 1){
-        this.brokerIdx++;
+      if (!this.everConnected && this.attempts < BROKERS.length - 1){
+        this.attempts++;
+        this.brokerIdx = (this.brokerIdx + 1) % BROKERS.length;
         try { c.end(true); } catch(e){}
         this._open();
       }
@@ -609,6 +614,13 @@ const Net = {
     if (!this.client || !this.client.connected) return false;
     this.client.publish(`${ROOT}/${this.code}/${leaf}`, JSON.stringify(data), {qos:0, retain:!!retain});
     return true;
+  },
+  /* 主动换一条线路（学生端在当前中继上找不到老师时用） */
+  switchBroker(){
+    try { this.client && this.client.end(true); } catch(e){}
+    this.everConnected = false; this.attempts = 0;
+    this.brokerIdx = (this.brokerIdx + 1) % BROKERS.length;
+    this._open();
   },
   clearRetained(leaf){
     if (this.client && this.client.connected)
@@ -656,16 +668,19 @@ const Host = {
 
     $('hCode').textContent = this.code;
 
-    const url = location.origin + location.pathname + '#j=' + this.code;
-    $('hUrl').textContent = url;
+    this.renderJoin();
     loadScript([
       'https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js',
       'https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js'
-    ]).then(() => new QRCode($('qrbox'), {text:url, width:272, height:272,
-        correctLevel: QRCode.CorrectLevel.M}))
+    ]).then(() => this.renderJoin())
       .catch(() => $('qrbox').innerHTML =
         '<div style="color:#333;padding:22px;font-size:14px">二维码组件没加载出来，让学生手输上面的网址和房间号</div>');
 
+    // round 是"这一局"的编号。每次从头开始换一个新编号，学生端据此清掉上一局的作答记录。
+    this.round = (saved && saved.round) || 0;
+    // 老师刷新页面时正在哪一题：回到大厅后可以从下一题继续
+    this.resumeQi = (saved && ['question','closing','reveal'].includes(saved.phase) && saved.qi >= 0) ? saved.qi : -1;
+    this.resumeSet = saved ? saved.setName : null;     // 只有还是同一套题时才提供"继续"
     if (saved && saved.players){
       saved.players.forEach(p => this.players.set(p.cid, {nick:p.nick, score:p.score, ans:p.ans||{}}));
       this.renderRoster();
@@ -680,9 +695,18 @@ const Host = {
     this.yielded = false;
     Net.connect(this.code, ['join','answer','hostbeat'],
       (leaf, d) => this.onMsg(leaf, d),
-      () => { if (!this.yielded){ this.beat(); this.publishState(); this.publishBoard(); } });
+      () => { this.renderJoin(); if (!this.yielded){ this.beat(); this.publishState(); this.publishBoard(); } });
     this.wire();
     this.save();          // 立刻存房间号，老师中途刷新不会换码
+  },
+
+  /* 加入链接和二维码。带上老师当前用的线路编号，连上后（可能已切换过线路）再画一次 */
+  renderJoin(){
+    const url = location.origin + location.pathname + '#j=' + this.code + '&b=' + Net.brokerIdx;
+    $('hUrl').textContent = url;
+    if (!window.QRCode) return;
+    if (this._qr) this._qr.makeCode(url);
+    else this._qr = new QRCode($('qrbox'), {text:url, width:272, height:272, correctLevel: QRCode.CorrectLevel.M});
   },
 
   /* 题库下拉框：默认第一套；上次选过且还存在就沿用 */
@@ -737,22 +761,51 @@ const Host = {
   },
 
   applySet(){
-    $('hQn').textContent = this.qs().length;
     $('hQt').textContent = this.qs().length;
-    $('hStart').disabled = this.players.size === 0 || this.qs().length === 0;
+    this.refreshStartButton();
+  },
+
+  resumable(){ return this.resumeQi >= 0 && this.resumeSet === this.setName && this.resumeQi < this.qs().length - 1; },
+
+  refreshStartButton(){
+    const n = this.qs().length;
+    if (this.resumable()){
+      $('hStart').textContent = `继续（从第 ${this.resumeQi + 2} / ${n} 题）`;
+      $('hRestart').classList.remove('hide');
+    } else {
+      $('hStart').textContent = `开始（${n} 题）`;
+      $('hRestart').classList.add('hide');
+    }
+    $('hStart').disabled = this.players.size === 0 || n === 0;
+  },
+
+  /* 从头开始：换一个新的 round，清空所有人的分数和作答。同一部手机第二次玩也能正常答题。 */
+  startFresh(){
+    this.round = Date.now();
+    for (const p of this.players.values()){ p.score = 0; p.ans = {}; }
+    this.qi = -1; this.resumeQi = -1; this.lastGain = {}; this._logged = false;
+    this.renderRoster();
+    this.nextQuestion();
+  },
+
+  startGame(){
+    if (this.resumable()){ this.qi = this.resumeQi; this.resumeQi = -1; this.nextQuestion(); }
+    else this.startFresh();
   },
 
   save(){
     if (this._wiped) return;      // 重开一局时别让 beforeunload 把旧分数写回去
     localStorage.setItem('cq_host', JSON.stringify({
       code:this.code, epoch:this.epoch, setName:this.setName, savedAt:Date.now(),
+      round:this.round, qi:this.qi, phase:this.phase,
       players:[...this.players].map(([cid,p]) => ({cid, nick:p.nick, score:p.score, ans:p.ans}))
     }));
   },
 
   wire(){
-    $('hSet').onchange  = () => { this.setName = $('hSet').value; this.applySet(); this.save(); };
-    $('hStart').onclick = () => { $('hSet').disabled = true; this.nextQuestion(); };
+    $('hSet').onchange  = () => { this.setName = $('hSet').value; this.resumeQi = -1; this.applySet(); this.save(); };
+    $('hStart').onclick = () => { $('hSet').disabled = true; this.startGame(); };
+    $('hRestart').onclick = () => { if (confirm('清空分数，从第 1 题重新开始？')) { $('hSet').disabled = true; this.startFresh(); } };
     $('hNext').onclick  = () => this.nextQuestion();
     $('hSkip').onclick  = () => this.closeQuestion(this.CLOSING_MS);
     $('hBoard').onclick = () => this.showBoard();
@@ -881,7 +934,7 @@ const Host = {
   renderRoster(){
     $('hCount').textContent = this.players.size;
     $('hTot').textContent   = this.players.size;
-    $('hStart').disabled    = this.players.size === 0 || this.qs().length === 0;
+    this.refreshStartButton();
     const box = $('roster');
     box.innerHTML = [...this.players.values()]
       .map(p => `<div class="chip">${esc(p.nick)}</div>`).join('');
@@ -1105,7 +1158,7 @@ const Host = {
     if (this.yielded) return;
     const q = ['question','closing','reveal'].includes(this.phase) ? this.qs()[this.qi] : null;
     Net.pub('state', {
-      epoch:this.epoch, phase:this.phase, qIndex:this.qi, total:this.qs().length,
+      epoch:this.epoch, round:this.round, phase:this.phase, qIndex:this.qi, total:this.qs().length,
       question: q ? q.q : null,
       options:  q ? q.options : null,
       seconds:  q ? q.seconds : null,
@@ -1125,7 +1178,7 @@ const Host = {
     if (this.yielded) return;
     const all = this.ranked();
     Net.pub('board', {
-      epoch:this.epoch, qIndex:this.qi,
+      epoch:this.epoch, round:this.round, qIndex:this.qi,
       gains:this.lastGain,
       list:[...this.players].map(([cid,p]) => ({cid, nick:p.nick, score:p.score}))
              .sort((a,b) => b.score - a.score),
@@ -1141,7 +1194,7 @@ const Stu = {
   code:null, cid:null, nick:null, joined:false,
   state:null, board:null, answeredQ:-1, skew:0, timer:null,
 
-  boot(code){
+  boot(code, brokerHint){
     this.code = code;
     $('sRoom').textContent = '房间 ' + code;
     this.cid = localStorage.getItem('cq_cid');
@@ -1152,13 +1205,35 @@ const Stu = {
     $('sGo').onclick = () => this.join();
     $('nick').addEventListener('keydown', e => { if (e.key === 'Enter') this.join(); });
 
-    Net.connect(code, ['state','board'], (leaf, d) => {
-      if (leaf === 'state'){ this.state = d; this.render(); }
+    Net.connect(code, ['state','board','hostbeat'], (leaf, d) => {
+      if (leaf === 'hostbeat'){ this.onBeat(d); return; }
+      if (leaf === 'state'){
+        if (d.round !== this.round){ this.round = d.round; this.answeredQ = -1; this.myChoice = null; }
+        this.state = d; this.render();
+      }
       if (leaf === 'board'){ this.board = d; this.render(); }
     }, () => {
       // 断线重连后立刻重新报到，免得老师那边把人弄丢
       if (this.joined) Net.pub('join', {cid:this.cid, nick:this.nick});
-    });
+      this.startDiscovery();
+    }, brokerHint);
+  },
+
+  /* 老师页面每 5 秒在它所在的中继上发一次心跳。连上一条线路后 12 秒内收到两次不同的心跳，
+     说明老师就在这条线路上；否则换下一条。这样手输房间号、或两边各自切换过线路，也能碰头。 */
+  startDiscovery(){
+    clearTimeout(this._disc); this._beats = [];
+    this._disc = setTimeout(() => {
+      this._hops = (this._hops || 0) + 1;
+      if (this._hops <= BROKERS.length){ banner('这条线路上找不到老师，换一条试…', 'warn'); Net.switchBroker(); }
+      else banner('找不到房间 ' + this.code + '。确认房间号，或让老师刷新一下页面', 'bad');
+    }, 12000);
+  },
+
+  onBeat(d){
+    if (!d || !d.t) return;
+    if (!this._beats.includes(d.t)) this._beats.push(d.t);
+    if (this._beats.length >= 2){ clearTimeout(this._disc); this._hops = 0; }
   },
 
   join(){
@@ -1228,7 +1303,7 @@ const Stu = {
         $('sRank').textContent = '调查题不计分，看大屏幕上的分布';
         return;
       }
-      const boardFresh = !!(this.board && this.board.qIndex === s.qIndex && this.board.gains);
+      const boardFresh = !!(this.board && this.board.qIndex === s.qIndex && this.board.round === s.round && this.board.gains);
       const gains = boardFresh ? this.board.gains : {};
       const received = this.cid in gains;
       const gain = gains[this.cid] || 0;
@@ -1343,13 +1418,15 @@ const Editor = {
 /* ============================================================
    6. 路由
    ============================================================ */
+window.addEventListener('hashchange', () => location.reload());
+
 function route(){
   const h = location.hash;
   hide('chooser','host','stu','edit');
   if (h === '#host'){ show('host'); Host.boot(); return; }
   if (h === '#edit'){ show('edit'); Editor.boot(); return; }
-  const m = h.match(/^#j=([A-Za-z0-9]{4})$/);
-  if (m){ show('stu'); Stu.boot(m[1].toUpperCase()); return; }
+  const m = h.match(/^#j=([A-Za-z0-9]{4})(?:&b=(\d))?$/);
+  if (m){ show('stu'); Stu.boot(m[1].toUpperCase(), m[2] === undefined ? undefined : +m[2]); return; }
 
   show('chooser');
   $('goHost').onclick = () => { location.hash = '#host'; location.reload(); };
