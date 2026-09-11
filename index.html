@@ -124,6 +124,8 @@ input.pw{font:inherit;font-size:15px;padding:9px 12px;border-radius:10px;border:
 .edErr{color:#ff8a95;font-size:14px;margin-top:6px;line-height:1.5}
 .edOk{color:#7fd8a5;font-size:14px}
 #edit code{background:#262b3a;padding:1px 5px;border-radius:5px}
+#edit.overlay{position:fixed;inset:0;z-index:45;background:var(--bg);overflow:auto;max-width:none;padding:20px 28px}
+#edit.overlay .editGrid{max-width:1180px;margin:0 auto}
 
 #hostYield{position:fixed;inset:0;background:var(--bg);z-index:40;padding:20px}
 
@@ -324,6 +326,8 @@ const Bank = {
           <div class="row">
             <div class="dim" style="font-size:14px">题库</div>
             <span id="bankStatus" style="font-size:14px">正在读取 bank.json…</span>
+            <div class="spacer"></div>
+            <button class="btn ghost sm hide" id="hEditBank">编辑题库</button>
           </div>
           <div class="row" id="bankUnlock" style="margin-top:8px">
             <input id="bankPass" type="password" placeholder="题库密码" autocomplete="off" class="pw">
@@ -415,6 +419,7 @@ const Bank = {
   <div class="row" style="margin-bottom:14px">
     <h1 style="font-size:26px">题库编辑</h1>
     <div class="spacer"></div>
+    <button class="btn ghost sm" id="edTemplate">插入一道新题模板</button>
     <button class="btn ghost sm" id="edToHost">回老师页面</button>
   </div>
   <div class="editGrid">
@@ -440,6 +445,8 @@ T: 25"></textarea>
         <input id="edPass" type="password" autocomplete="off" placeholder="建议用一句话" class="pw" style="width:100%">
         <input id="edPass2" type="password" autocomplete="off" placeholder="再输一遍" class="pw" style="width:100%;margin-top:8px">
         <div class="row" style="margin-top:12px">
+          <button class="btn hide" id="edSaveLocal">保存并立即使用</button>
+          <button class="btn ghost sm hide" id="edSync">同步到 GitHub</button>
           <button class="btn" id="edSave">下载题库文件 bank.json</button>
           <button class="btn ghost sm" id="edSaveTxt">下载纯文本备份</button>
         </div>
@@ -828,11 +835,17 @@ const Host = {
   /* 从站点同目录取 bank.json；没有就允许从本机选文件 */
   async loadBank(saved){
     const st = $('bankStatus');
-    try { this.bankBlob = await Bank.fetchBlob(); }
+    try { this.bankBlob = await Bank.fetchBlob(); this.siteBlob = this.bankBlob; }
     catch(e){
       this.bankBlob = null;
       st.textContent = '站点上没有 bank.json。可以从本机选择题库文件，或先用演示题';
       $('bankPick').classList.remove('hide');
+    }
+    // 本机上如果有更新的编辑版，优先用它（时间戳比站点的新）
+    const local = this.readLocalBank();
+    if (local && (!this.bankBlob || (local.made || '') > (this.bankBlob.made || ''))){
+      this.bankBlob = local; this.usingLocal = true;
+      this.localSynced = localStorage.getItem('cq_bank_synced') === (local.made || '');
     }
     if (this.bankBlob){
       st.textContent = '已找到 bank.json，输入密码解锁';
@@ -860,10 +873,49 @@ const Host = {
     const r = Bank.parse(text);
     if (r.errors.length){ st.textContent = '题库有格式问题：' + r.errors[0]; return; }
     QUESTION_SETS = r.sets;
+    this.pass = pass; this.bankText = text;
     this.populateSets(saved);
     if ($('bankRemember').checked) localStorage.setItem('cq_pass', pass); else localStorage.removeItem('cq_pass');
-    st.textContent = `已解锁：${Object.keys(r.sets).length} 套题，共 ${r.count} 道`;
+    this.showBankStatus(r);
     $('bankUnlock').classList.add('hide');
+    $('hEditBank').classList.remove('hide');
+  },
+
+  showBankStatus(r){
+    const n = Object.keys(r.sets).length, c = r.count;
+    const src = this.usingLocal
+      ? `本机编辑版 ${this.fmtMade(this.bankBlob.made)}${this.localSynced ? '' : '，还没同步到站点'}`
+      : '站点版';
+    $('bankStatus').textContent = `已解锁：${n} 套题，共 ${c} 道（${src}）`;
+  },
+
+  readLocalBank(){ try { return JSON.parse(localStorage.getItem('cq_bank_local') || 'null'); } catch(e){ return null; } },
+  fmtMade(iso){ const d = new Date(iso || 0); const z = n => String(n).padStart(2,'0'); return `${d.getFullYear()}-${z(d.getMonth()+1)}-${z(d.getDate())} ${z(d.getHours())}:${z(d.getMinutes())}`; },
+
+  /* 老师在页面里改完题：加密存到本机，立刻生效 */
+  async saveBankLocal(text){
+    const r = Bank.parse(text);
+    if (r.errors.length) return { ok:false, msg:'先把格式问题改掉：' + r.errors[0] };
+    const blob = await Bank.encrypt(text, this.pass);
+    localStorage.setItem('cq_bank_local', JSON.stringify(blob));
+    this.bankBlob = blob; this.usingLocal = true; this.localSynced = false; this.bankText = text;
+    QUESTION_SETS = r.sets;
+    this.resumeQi = -1;
+    this.populateSets(null);
+    this.showBankStatus(r);
+    return { ok:true, msg:`已保存并生效：${Object.keys(r.sets).length} 套 / ${r.count} 题`, blob };
+  },
+
+  /* 老师页面里打开编辑器（覆盖整个页面），关闭后回到大厅 */
+  openEditor(){
+    if (this.phase !== 'lobby') return alert('出题过程中不能改题库，先做完或提前结束');
+    $('edit').classList.remove('hide'); $('edit').classList.add('overlay');
+    Editor.inHost = true; Editor.boot();
+    $('edText').value = this.bankText || ''; Editor.preview();
+    $('edPass').value = this.pass; $('edPass2').value = this.pass;
+    $('edSaveLocal').classList.remove('hide'); $('edSync').classList.remove('hide');
+    $('edToHost').textContent = '关闭，回老师页面';
+    Editor.msg('改完点"保存并立即使用"。想让别的电脑也用上，再点"同步到 GitHub"。', true);
   },
 
   applySet(){
@@ -917,6 +969,7 @@ const Host = {
     $('hBoard').onclick = () => this.showBoard();
     $('hEnd').onclick   = () => { if (confirm('不做剩下的题，直接结算？')) this.finish(); };
     $('hTakeover').onclick = () => this.takeover();
+    $('hEditBank').onclick = () => this.openEditor();
     Music.setOn(localStorage.getItem('cq_music') !== '0');
     $('hMusic').onclick = () => { Music.init(); Music.setOn(!Music.on); };
     this.startBeating();
@@ -1480,7 +1533,13 @@ const Editor = {
     const draft = localStorage.getItem('cq_edit_draft');
     if (draft) $('edText').value = draft;
     $('edText').addEventListener('input', () => { this.preview(); localStorage.setItem('cq_edit_draft', $('edText').value); });
-    $('edToHost').onclick = () => { location.hash = '#host'; location.reload(); };
+    $('edToHost').onclick = () => {
+      if (this.inHost){ $('edit').classList.add('hide'); $('edit').classList.remove('overlay'); return; }
+      location.hash = '#host'; location.reload();
+    };
+    $('edTemplate').onclick = () => this.insertTemplate();
+    $('edSaveLocal').onclick = () => this.saveLocal();
+    $('edSync').onclick = () => this.syncGitHub();
     $('edLoadJson').onclick = () => $('edFileJson').click();
     $('edLoadTxt').onclick  = () => $('edFileTxt').click();
     $('edFileTxt').onchange = async () => {
@@ -1514,6 +1573,67 @@ const Editor = {
       (r.errors.length
         ? `<div class="edErr">${r.errors.slice(0,8).map(esc).join('<br>')}${r.errors.length > 8 ? '<br>…' : ''}</div>`
         : `<div class="edOk" style="margin-top:6px">格式没问题</div>`);
+  },
+
+  /* 在光标处插入一道新题的模板 */
+  insertTemplate(){
+    const ta = $('edText'), tpl = '\nQ: 题干写在这里\nA. 选项一\nB. 选项二 *\nC. 选项三\nD. 选项四\nT: 25\n';
+    const i = ta.selectionStart ?? ta.value.length;
+    ta.value = ta.value.slice(0, i) + tpl + ta.value.slice(i);
+    ta.focus(); ta.selectionStart = ta.selectionEnd = i + 4;
+    this.preview();
+  },
+
+  async saveLocal(){
+    if (!Host.pass) return this.msg('先在老师页面解锁题库', false);
+    const res = await Host.saveBankLocal($('edText').value);
+    this.msg(res.msg, res.ok);
+    this.lastBlob = res.ok ? res.blob : null;
+  },
+
+  ghInfo(){
+    const m = location.hostname.match(/^([^.]+)\.github\.io$/); if (!m) return null;
+    const repo = location.pathname.split('/').filter(Boolean)[0]; if (!repo) return null;
+    return { owner:m[1], repo };
+  },
+
+  /* 把当前题库提交到 GitHub 仓库的 bank.json。需要老师自己创建的 fine-grained token，
+     只存在这台电脑的浏览器里；页面永远不把它发到 GitHub 以外的地方。 */
+  async syncGitHub(){
+    const info = this.ghInfo();
+    if (!info) return this.msg('只有放在 GitHub Pages 上打开时才能同步；本地打开请用"下载 bank.json"再上传', false);
+    const r = Bank.parse($('edText').value);
+    if (r.errors.length) return this.msg('先把格式问题改掉：' + r.errors[0], false);
+    if (!Host.pass) return this.msg('先在老师页面解锁题库', false);
+    let token = localStorage.getItem('cq_gh_token');
+    if (!token){
+      token = prompt('第一次同步需要一个 GitHub 令牌（fine-grained personal access token，只给仓库 ' + info.owner + '/' + info.repo + ' 的 Contents 读写权限）。粘贴在这里，它只保存在这台电脑的浏览器里：');
+      if (!token) return; token = token.trim(); localStorage.setItem('cq_gh_token', token);
+    }
+    this.msg('正在同步到 GitHub…', true);
+    const blob = await Bank.encrypt($('edText').value, Host.pass);
+    const api = `https://api.github.com/repos/${info.owner}/${info.repo}/contents/bank.json`;
+    const H = { Authorization:'Bearer ' + token, Accept:'application/vnd.github+json', 'Content-Type':'application/json' };
+    let sha = null;
+    try {
+      const g = await fetch(api, { headers:H });
+      if (g.status === 200) sha = (await g.json()).sha;
+      else if (g.status === 401 || g.status === 403){ localStorage.removeItem('cq_gh_token'); return this.msg('令牌无效或没有这个仓库的权限，已清除，下次会重新要', false); }
+      else if (g.status !== 404) return this.msg('读取仓库失败：HTTP ' + g.status, false);
+    } catch(e){ return this.msg('连不上 GitHub：' + e.message, false); }
+    const body = { message:'Update quiz bank ' + new Date().toISOString().slice(0,16).replace('T',' '), content: btoa(JSON.stringify(blob)) };
+    if (sha) body.sha = sha;
+    let put;
+    try { put = await fetch(api, { method:'PUT', headers:H, body:JSON.stringify(body) }); }
+    catch(e){ return this.msg('连不上 GitHub：' + e.message, false); }
+    if (put.status === 401 || put.status === 403){ localStorage.removeItem('cq_gh_token'); return this.msg('令牌无效或没有写权限，已清除，下次会重新要', false); }
+    if (!put.ok) return this.msg('同步失败：HTTP ' + put.status, false);
+    // 同步成功：本机也存同一份，并标记已同步
+    localStorage.setItem('cq_bank_local', JSON.stringify(blob));
+    localStorage.setItem('cq_bank_synced', blob.made);
+    Host.bankBlob = blob; Host.usingLocal = true; Host.localSynced = true; Host.bankText = $('edText').value;
+    QUESTION_SETS = r.sets; Host.resumeQi = -1; Host.populateSets(null); Host.showBankStatus(r);
+    this.msg('已同步到 GitHub。站点大约一分钟后更新，别的电脑打开就是新题库', true);
   },
 
   async save(){
