@@ -309,6 +309,7 @@ const Bank = {
     <div><div class="dim" style="font-size:13px">房间号</div><div class="code" id="hCode">----</div></div>
     <div class="spacer"></div>
     <div id="hStatus" class="dim" style="font-size:15px"></div>
+    <button class="btn ghost sm" id="hMusic" title="倒计时音乐开关">🔊 音乐</button>
   </div>
 
   <!-- 大厅 -->
@@ -639,6 +640,111 @@ function scoreFor(correct, elapsedMs, limitSec){
 }
 
 /* ============================================================
+   2b. 倒计时音乐（只在老师端播）。浏览器实时合成，没有音频文件，没有版权问题。
+   E 小调、110 BPM 的两小节循环：底鼓 + 军鼓 + 踩镲 + 锯齿波贝斯 + 方波旋律。
+   最后 10 秒提速到 122，最后 5 秒 136 并加军鼓滚和上升音；时间到有蜂鸣，公布答案有一声亮音。
+   ============================================================ */
+const Music = {
+  ctx:null, master:null, noise:null, on:true, playing:false,
+  step:0, nextT:0, startT:0, dur:20, timer:null, riserStarted:false,
+  N: { E2:82.41, G2:98.00, B2:123.47, D3:146.83, E4:329.63, G4:392.00, Gs4:415.30, B4:493.88, D5:587.33, E5:659.26 },
+
+  init(){
+    if (this.ctx) return true;
+    const AC = window.AudioContext || window.webkitAudioContext; if (!AC) return false;
+    this.ctx = new AC();
+    this.master = this.ctx.createGain(); this.master.gain.value = 0.35; this.master.connect(this.ctx.destination);
+    const len = this.ctx.sampleRate, buf = this.ctx.createBuffer(1, len, this.ctx.sampleRate), d = buf.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+    this.noise = buf;
+    return true;
+  },
+
+  start(seconds){
+    if (!this.on || !this.init()) return;
+    if (this.ctx.state === 'suspended') this.ctx.resume();
+    this.stop();
+    this.playing = true; this.dur = seconds; this.startT = this.ctx.currentTime;
+    this.step = 0; this.nextT = this.startT + 0.05; this.riserStarted = false;
+    this.tick();
+  },
+  stop(){ this.playing = false; clearTimeout(this.timer); },
+  left(){ return this.dur - (this.ctx.currentTime - this.startT); },
+  bpm(){ const l = this.left(); return l <= 5 ? 136 : (l <= 10 ? 122 : 110); },
+
+  tick(){
+    if (!this.playing) return;
+    while (this.nextT < this.ctx.currentTime + 0.25){
+      this.playStep(this.step, this.nextT);
+      this.nextT += 60 / this.bpm() / 4; this.step++;
+    }
+    if (this.left() <= 5.2 && !this.riserStarted){ this.riserStarted = true; this.riser(this.ctx.currentTime, Math.max(1, this.left())); }
+    this.timer = setTimeout(() => this.tick(), 60);
+  },
+
+  /* ---- 乐器 ---- */
+  env(g, t, a, peak, dec){
+    g.gain.setValueAtTime(0.0001, t);
+    g.gain.linearRampToValueAtTime(peak, t + a);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + a + dec);
+  },
+  osc(type, f, t, dur, peak){
+    const o = this.ctx.createOscillator(), g = this.ctx.createGain();
+    o.type = type; o.frequency.setValueAtTime(f, t); o.connect(g); g.connect(this.master);
+    this.env(g, t, 0.005, peak, dur); o.start(t); o.stop(t + dur + 0.05);
+  },
+  kick(t){
+    const o = this.ctx.createOscillator(), g = this.ctx.createGain();
+    o.frequency.setValueAtTime(160, t); o.frequency.exponentialRampToValueAtTime(45, t + 0.12);
+    o.connect(g); g.connect(this.master); this.env(g, t, 0.002, 0.9, 0.22); o.start(t); o.stop(t + 0.3);
+  },
+  noiseHit(t, type, freq, q, peak, dec){
+    const s = this.ctx.createBufferSource(); s.buffer = this.noise;
+    const f = this.ctx.createBiquadFilter(); f.type = type; f.frequency.value = freq; f.Q.value = q;
+    const g = this.ctx.createGain(); s.connect(f); f.connect(g); g.connect(this.master);
+    this.env(g, t, 0.001, peak, dec); s.start(t); s.stop(t + dec + 0.05);
+  },
+  hat(t, accent){ this.noiseHit(t, 'highpass', 7000, 1, accent ? 0.25 : 0.12, accent ? 0.07 : 0.035); },
+  snare(t){ this.noiseHit(t, 'bandpass', 1800, 0.8, 0.5, 0.14); this.osc('triangle', 190, t, 0.08, 0.3); },
+  bass(f, t, dur){
+    const o = this.ctx.createOscillator(), fl = this.ctx.createBiquadFilter(), g = this.ctx.createGain();
+    o.type = 'sawtooth'; o.frequency.value = f;
+    fl.type = 'lowpass'; fl.frequency.setValueAtTime(900, t); fl.frequency.exponentialRampToValueAtTime(250, t + dur);
+    o.connect(fl); fl.connect(g); g.connect(this.master); this.env(g, t, 0.005, 0.45, dur); o.start(t); o.stop(t + dur + 0.05);
+  },
+  lead(f, t, dur){ this.osc('square', f, t, dur, 0.09); this.osc('triangle', f * 2, t, dur, 0.05); },
+  riser(t, secs){
+    const o = this.ctx.createOscillator(), g = this.ctx.createGain();
+    o.type = 'sawtooth'; o.frequency.setValueAtTime(180, t); o.frequency.exponentialRampToValueAtTime(1400, t + secs);
+    o.connect(g); g.connect(this.master);
+    g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(0.12, t + secs); g.gain.setValueAtTime(0.0001, t + secs + 0.02);
+    o.start(t); o.stop(t + secs + 0.05);
+  },
+
+  playStep(i, t){
+    const N = this.N, s = i % 16, bar = Math.floor(i / 16), urgent = this.left() <= 5;
+    if (s % 4 === 0) this.kick(t);
+    if (s === 4 || s === 12) this.snare(t);
+    if (urgent && s % 2 === 1) this.snare(t);                       // 最后 5 秒军鼓滚
+    if (s % 2 === 0) this.hat(t, s % 4 === 2);                       // 踩镲只走八分音符，重音在反拍
+    const bassPat = [N.E2, N.E2, N.G2, N.E2, N.B2, N.E2, N.D3, N.E2];
+    if (s % 2 === 0) this.bass(bassPat[(s / 2) % 8], t, 0.11);
+    const leadPat = [N.E4, 0, N.G4, 0, N.B4, 0, N.E5, N.D5, N.B4, 0, N.G4, 0, N.E4, 0, 0, 0];
+    if ((bar % 2 === 1 || urgent) && leadPat[s]) this.lead(leadPat[s], t, 0.1);
+  },
+
+  buzzer(){ if (!this.on || !this.ctx) return; const t = this.ctx.currentTime; this.osc('square', 110, t, 0.5, 0.35); this.osc('square', 116, t, 0.5, 0.25); },
+  sting(){ if (!this.on || !this.ctx) return; const t = this.ctx.currentTime, N = this.N;
+    [N.E4, N.Gs4, N.B4, N.E5].forEach((f, k) => this.osc('triangle', f, t + k * 0.07, 0.35, 0.25)); },
+
+  setOn(v){
+    this.on = v; localStorage.setItem('cq_music', v ? '1' : '0');
+    $('hMusic').textContent = v ? '🔊 音乐' : '🔇 音乐';
+    if (!v) this.stop();
+  }
+};
+
+/* ============================================================
    3. 主持端
    ============================================================ */
 const Host = {
@@ -811,6 +917,8 @@ const Host = {
     $('hBoard').onclick = () => this.showBoard();
     $('hEnd').onclick   = () => { if (confirm('不做剩下的题，直接结算？')) this.finish(); };
     $('hTakeover').onclick = () => this.takeover();
+    Music.setOn(localStorage.getItem('cq_music') !== '0');
+    $('hMusic').onclick = () => { Music.init(); Music.setOn(!Music.on); };
     this.startBeating();
     $('hDl1').onclick   = () => this.downloadLog();
     $('hDl2').onclick   = () => this.downloadLog();
@@ -852,6 +960,7 @@ const Host = {
   yieldTo(d){
     if (this.yielded) return;
     this.yielded = true;
+    Music.stop();
     clearInterval(this.timer); clearInterval(this._beatTimer);
     $('hostYield').classList.remove('hide');
   },
@@ -948,6 +1057,7 @@ const Host = {
     this.dist = [0,0,0,0]; this.lastGain = {};
 
     hide('hLobby','hReveal','hLb','hFinal'); show('hQuiz');
+    Music.start(q.seconds);
     $('hQi').textContent = this.qi + 1;
     $('hQ').textContent  = (q.survey ? '【调查】' : '') + q.q;
     $('hAns').textContent = '0';
@@ -973,6 +1083,8 @@ const Host = {
     if (this.phase !== 'question') return;
     this.phase = 'closing';
     clearInterval(this.timer);
+    Music.stop();
+    if (waitMs >= this.CLOSING_MS) Music.buzzer();          // 时间到或老师手动公布才响；全员答完不响
     $('hSec').textContent = '0';
     $('hRing').style.setProperty('--p', 0);
     $('hSkip').textContent = '收尾中，等最后几份答案…'; $('hSkip').disabled = true;
@@ -984,6 +1096,7 @@ const Host = {
     if (this.phase !== 'question' && this.phase !== 'closing') return;
     clearInterval(this.timer);
     this.phase = 'reveal';
+    Music.stop(); Music.sting();
     $('hSkip').textContent = '立刻公布答案'; $('hSkip').disabled = false;
     const q = this.qs()[this.qi];
     // 分布从名单重新数一遍，不依赖过程中的累加
@@ -1141,6 +1254,7 @@ const Host = {
 
   finish(){
     this.phase = 'final'; clearInterval(this.timer);
+    Music.stop(); Music.sting();
     hide('hQuiz','hReveal','hLb','hLobby'); show('hFinal');
     this.logSession();
     this.renderWeak();
