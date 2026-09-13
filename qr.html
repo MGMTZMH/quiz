@@ -1,0 +1,180 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spike: full-length QR</title>
+<!--
+  Task 1 spike. Project this page full screen and scan the code from the back row.
+  The code holds the address of phone.html beside this page, with a fragment shaped like a
+  real team ticket and at least as long. The address is printed under the code.
+-->
+<style>
+  html, body { background: #ffffff; color: #000000; }
+  body {
+    margin: 0; padding: 0 0 24px; text-align: center;
+    font: 20px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  #qrbox { display: inline-block; vertical-align: top; padding: 3vmin; background: #ffffff; }
+  .line {
+    font-size: 22px; margin: 8px 12px; padding: 8px 10px; text-align: left; background: #f2f2f2;
+    border-left: 8px solid #8c959f; overflow-wrap: break-word; word-wrap: break-word;
+  }
+  .ok   { border-left-color: #1a7f37; } .ok b   { color: #1a7f37; }
+  .fail { border-left-color: #cf222e; } .fail b { color: #cf222e; }
+  .wait { border-left-color: #bf8700; } .wait b { color: #9a6700; }
+  .info { border-left-color: #57606a; } .info b { color: #57606a; }
+  .mono {
+    display: block; margin-top: 6px; font-size: 20px; word-break: break-all;
+    font-family: Menlo, Consolas, "Courier New", monospace;
+  }
+  #page .line, #page .mono { font-size: 16px; }
+</style>
+
+<div id="qrbox"><div id="qr"></div></div>
+<div id="status"></div>
+<div id="address"></div>
+<div id="errors"></div>
+<div id="page"></div>
+
+<script>
+// Old-style JavaScript on purpose: it runs in any browser, so a later script that fails,
+// even one this browser cannot parse, still shows up on the page.
+function spikeShowError(text) {
+  var box = document.getElementById('errors');
+  var none = document.getElementById('no-errors');
+  if (!box) return;
+  if (none) box.removeChild(none);
+  var el = document.createElement('div');
+  var b = document.createElement('b');
+  el.className = 'line fail';
+  b.appendChild(document.createTextNode('FAIL'));
+  el.appendChild(b);
+  el.appendChild(document.createTextNode(' ' + text));
+  box.appendChild(el);
+}
+window.onerror = function (message, source, lineno) {
+  spikeShowError('uncaught error: ' + message + (lineno ? ' (line ' + lineno + ')' : ''));
+};
+window.addEventListener('unhandledrejection', function (ev) {
+  var r = ev ? ev.reason : undefined;
+  spikeShowError('unhandled promise rejection: ' + (r && r.message ? r.message : String(r)));
+});
+</script>
+
+<script>
+// The quiz app's loader, verbatim.
+function loadScript(urls){
+  return new Promise((resolve, reject) => {
+    let i = 0;
+    (function attempt(){
+      if (i >= urls.length) return reject(new Error('all sources failed'));
+      const s = document.createElement('script');
+      s.src = urls[i++];
+      s.onload = resolve;
+      s.onerror = () => { s.remove(); attempt(); };
+      document.head.appendChild(s);
+    })();
+  });
+}
+
+(function () {
+  'use strict';
+
+  const QRCODE_URL = 'https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js';
+  // A real ECDH P-256 public key (65 raw bytes, base64url, 87 characters), made once with
+  // plan-v2-verified-code/crypto-block.js. phone.html holds the same key to check the scan.
+  const TEST_KEY = 'BBCh5QyzTBOgf3XeTkNC5AnYXxAcNqxLQkbzlbHDEu1Nt-rDk39RxKBZKLU5O1eBcq0DAI_CVh3uE30vepCWvmU';
+
+  function errText(e) {
+    if (e === undefined || e === null) return 'unknown error';
+    if (typeof e === 'string') return e;
+    const message = e.message ? String(e.message) : String(e);
+    return e.name && message.indexOf(String(e.name)) !== 0 ? e.name + ': ' + message : message;
+  }
+
+  const WORDS = { ok: 'OK', fail: 'FAIL', wait: 'WAIT', info: 'INFO' };
+
+  // One result line: a bold OK / FAIL / WAIT / INFO word, the text, and an optional monospace value.
+  function setLine(el, state, text, mono) {
+    const b = document.createElement('b');
+    b.textContent = WORDS[state];
+    el.className = 'line ' + state;
+    el.textContent = '';
+    el.appendChild(b);
+    el.appendChild(document.createTextNode(' ' + text));
+    if (mono !== undefined) {
+      const m = document.createElement('span');
+      m.className = 'mono';
+      m.textContent = mono;
+      el.appendChild(m);
+    }
+  }
+
+  function addLine(box) {
+    const el = document.createElement('div');
+    box.appendChild(el);
+    return el;
+  }
+
+  const statusLine = document.getElementById('status');
+  const addressLine = document.getElementById('address');
+  const pageBox = document.getElementById('page');
+
+  setLine(addLine(pageBox), 'info', 'this page, location.href:', location.href);
+  setLine(addLine(pageBox), 'info', 'isSecureContext: ' + window.isSecureContext);
+  setLine(addLine(pageBox), 'info', 'navigator.userAgent:', navigator.userAgent);
+
+  // The address a team phone would open: phone.html beside this page, with a ticket-shaped fragment.
+  let address;
+  try {
+    const target = new URL('phone.html', location.href);
+    target.hash = 'r=ABCD&b=0&l=en&t=ABCDEFGH&k=' + TEST_KEY;
+    address = target.href;
+  } catch (e) {
+    setLine(statusLine, 'fail', 'could not build the address to encode: ' + errText(e));
+    return;
+  }
+  setLine(addressLine, 'info', 'encoded address, ' + address.length + ' characters:', address);
+
+  function draw() {
+    const box = document.getElementById('qr');
+    const size = Math.max(160, Math.floor(Math.min(innerWidth, innerHeight) * 0.8));
+    box.textContent = '';
+    try {
+      const code = new QRCode(box, {
+        text: address,
+        width: size,
+        height: size,
+        colorDark: '#000000',
+        colorLight: '#ffffff',
+        correctLevel: QRCode.CorrectLevel.M
+      });
+      let modules = '';
+      try {
+        const n = code._oQRCode.getModuleCount();
+        modules = ', ' + n + ' x ' + n + ' modules (QR version ' + ((n - 17) / 4) + ')';
+      } catch (e) {
+        // qrcodejs internals differ from 1.0.0: leave the module count out
+      }
+      setLine(statusLine, 'ok', 'QR code drawn at error correction level M, ' + size + ' px wide' + modules);
+    } catch (e) {
+      box.textContent = '';
+      setLine(statusLine, 'fail', 'qrcodejs could not draw the code: ' + errText(e));
+    }
+  }
+
+  setLine(statusLine, 'wait', 'loading qrcodejs ...');
+  loadScript([QRCODE_URL]).then(() => {
+    if (typeof QRCode !== 'function') {
+      setLine(statusLine, 'fail', 'qrcodejs loaded, but QRCode is missing');
+      return;
+    }
+    draw();
+    let resizeTimer = null;
+    window.addEventListener('resize', () => {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(draw, 250);
+    });
+  }, e => {
+    setLine(statusLine, 'fail', 'qrcodejs did not load (' + errText(e) + '):', QRCODE_URL);
+  });
+})();
+</script>

@@ -1,0 +1,458 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spike: phone check</title>
+<!--
+  Task 1 spike, for real phones. It checks that the address survives a QR scan, that mqtt.js
+  loads, that the public relays echo a message, and that a WebCrypto key survives a reload.
+  Open it by scanning spike/qr.html, or directly. Every result is one line with OK or FAIL.
+-->
+<style>
+  body {
+    margin: 0; padding: 12px 12px 40px; background: #ffffff; color: #111111;
+    font: 20px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  h1 { font-size: 26px; margin: 4px 0 10px; }
+  h2 { font-size: 20px; margin: 24px 0 6px; color: #444444; }
+  .line {
+    font-size: 22px; margin: 8px 0; padding: 8px 10px; background: #f2f2f2;
+    border-left: 8px solid #8c959f; overflow-wrap: break-word; word-wrap: break-word;
+  }
+  .ok   { border-left-color: #1a7f37; } .ok b   { color: #1a7f37; }
+  .fail { border-left-color: #cf222e; } .fail b { color: #cf222e; }
+  .wait { border-left-color: #bf8700; } .wait b { color: #9a6700; }
+  .info { border-left-color: #57606a; } .info b { color: #57606a; }
+  .mono {
+    display: block; margin-top: 6px; font-size: 20px; word-break: break-all;
+    font-family: Menlo, Consolas, "Courier New", monospace;
+  }
+  button { font-size: 20px; min-height: 48px; padding: 8px 16px; margin: 8px 8px 0 0; }
+</style>
+
+<h1>Phone check</h1>
+<div id="results"></div>
+<div>
+  <button id="reload" type="button">Reload page</button>
+  <button id="clear" type="button">Clear stored key</button>
+</div>
+<div id="action"></div>
+
+<h2>Address</h2>
+<div id="address"></div>
+
+<h2>Browser</h2>
+<div id="browser"></div>
+
+<h2>Unexpected errors</h2>
+<div id="errors"><div id="no-errors" class="line ok"><b>OK</b> none so far</div></div>
+
+<script>
+// Old-style JavaScript on purpose: it runs in any browser, so a later script that fails,
+// even one this browser cannot parse, still shows up on the page.
+function spikeShowError(text) {
+  var box = document.getElementById('errors');
+  var none = document.getElementById('no-errors');
+  if (!box) return;
+  if (none) box.removeChild(none);
+  var el = document.createElement('div');
+  var b = document.createElement('b');
+  el.className = 'line fail';
+  b.appendChild(document.createTextNode('FAIL'));
+  el.appendChild(b);
+  el.appendChild(document.createTextNode(' ' + text));
+  box.appendChild(el);
+}
+window.onerror = function (message, source, lineno) {
+  spikeShowError('uncaught error: ' + message + (lineno ? ' (line ' + lineno + ')' : ''));
+};
+window.addEventListener('unhandledrejection', function (ev) {
+  var r = ev ? ev.reason : undefined;
+  spikeShowError('unhandled promise rejection: ' + (r && r.message ? r.message : String(r)));
+});
+</script>
+
+<script>
+/* ==== crypto block: single source, copied into sim.html and team.html ====
+   Do not edit the copies. Edit this file and run: python sync_blocks.py    */
+const B64 = {
+  enc(buf){
+    const u = new Uint8Array(buf); let s = '';
+    for (let i = 0; i < u.length; i++) s += String.fromCharCode(u[i]);
+    return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  },
+  dec(str){
+    const s = String(str).replace(/-/g, '+').replace(/_/g, '/');
+    const b = atob(s), u = new Uint8Array(b.length);
+    for (let i = 0; i < b.length; i++) u[i] = b.charCodeAt(i);
+    return u.buffer;
+  }
+};
+const ECDH_P256 = { name: 'ECDH', namedCurve: 'P-256' };
+function newKeyPair(){
+  return crypto.subtle.generateKey(ECDH_P256, true, ['deriveKey']);
+}
+async function exportPub(kp){
+  return B64.enc(await crypto.subtle.exportKey('raw', kp.publicKey));
+}
+async function exportPriv(kp){
+  return JSON.stringify(await crypto.subtle.exportKey('jwk', kp.privateKey));
+}
+async function importPair(privJwk, pubB64){
+  const privateKey = await crypto.subtle.importKey('jwk', JSON.parse(privJwk), ECDH_P256, true, ['deriveKey']);
+  const publicKey  = await crypto.subtle.importKey('raw', B64.dec(pubB64), ECDH_P256, true, []);
+  return { privateKey, publicKey };
+}
+async function deriveShared(myKp, theirPub){
+  const pub = await crypto.subtle.importKey('raw', B64.dec(theirPub), ECDH_P256, false, []);
+  return crypto.subtle.deriveKey({ name: 'ECDH', public: pub }, myKp.privateKey,
+                                 { name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt']);
+}
+async function exportAes(key){
+  return B64.enc(await crypto.subtle.exportKey('raw', key));
+}
+function importAes(b64){
+  return crypto.subtle.importKey('raw', B64.dec(b64), { name: 'AES-GCM' }, true, ['encrypt', 'decrypt']);
+}
+async function seal(key, topic, obj){
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv, additionalData: new TextEncoder().encode(topic) }, key,
+    new TextEncoder().encode(JSON.stringify(obj)));
+  return B64.enc(iv) + '.' + B64.enc(ct);
+}
+async function unseal(key, topic, msg){
+  if (typeof msg !== 'string') return null;
+  const parts = msg.split('.');
+  if (parts.length !== 2) return null;
+  try {
+    const pt = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: new Uint8Array(B64.dec(parts[0])), additionalData: new TextEncoder().encode(topic) },
+      key, B64.dec(parts[1]));
+    const o = JSON.parse(new TextDecoder().decode(pt));
+    return (o && typeof o === 'object') ? o : null;
+  } catch (e) { return null; }
+}
+/* ==== end crypto block ==== */
+</script>
+
+<script>
+// The quiz app's loader, verbatim except that onload resolves with the address that loaded.
+function loadScript(urls){
+  return new Promise((resolve, reject) => {
+    let i = 0;
+    (function attempt(){
+      if (i >= urls.length) return reject(new Error('all sources failed'));
+      const s = document.createElement('script');
+      s.src = urls[i++];
+      s.onload = () => resolve(s.src);
+      s.onerror = () => { s.remove(); attempt(); };
+      document.head.appendChild(s);
+    })();
+  });
+}
+
+(function () {
+  'use strict';
+
+  const MQTT_URLS = [
+    'https://cdnjs.cloudflare.com/ajax/libs/mqtt/5.10.1/mqtt.min.js',
+    'https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js'
+  ];
+  const RELAYS = [
+    'wss://test.mosquitto.org:8081/',
+    'wss://broker.emqx.io:8084/mqtt',
+    'wss://broker.hivemq.com:8884/mqtt'
+  ];
+  const ECHO_WAIT_MS = 8000;
+  const CRYPTO_TOPIC = 'sim1/spike/test';
+  const STORE_KEY = 'sim1.spike.key';
+  const STORE_MSG = 'sim1.spike.msg';
+  // qr.html encodes this same key. Keep the two copies identical.
+  const TEST_KEY = 'BBCh5QyzTBOgf3XeTkNC5AnYXxAcNqxLQkbzlbHDEu1Nt-rDk39RxKBZKLU5O1eBcq0DAI_CVh3uE30vepCWvmU';
+  const QR_HASH = '#r=ABCD&b=0&l=en&t=ABCDEFGH&k=' + TEST_KEY;
+
+  // ---- helpers ----
+
+  function errText(e) {
+    if (e === undefined || e === null) return 'unknown error';
+    if (typeof e === 'string') return e;
+    const message = e.message ? String(e.message) : String(e);
+    return e.name && message.indexOf(String(e.name)) !== 0 ? e.name + ': ' + message : message;
+  }
+
+  function randHex(nBytes) {
+    const u = new Uint8Array(nBytes);
+    try {
+      crypto.getRandomValues(u);
+    } catch (e) {
+      for (let i = 0; i < nBytes; i++) u[i] = Math.floor(Math.random() * 256);
+    }
+    let s = '';
+    for (let i = 0; i < nBytes; i++) s += (u[i] < 16 ? '0' : '') + u[i].toString(16);
+    return s;
+  }
+
+  function firstDiff(a, b) {
+    const n = Math.min(a.length, b.length);
+    for (let i = 0; i < n; i++) if (a.charAt(i) !== b.charAt(i)) return i;
+    return n;
+  }
+
+  const WORDS = { ok: 'OK', fail: 'FAIL', wait: 'WAIT', info: 'INFO' };
+
+  // One result line: a bold OK / FAIL / WAIT / INFO word, the text, and an optional monospace value.
+  function setLine(el, state, text, mono) {
+    const b = document.createElement('b');
+    b.textContent = WORDS[state];
+    el.className = 'line ' + state;
+    el.textContent = '';
+    el.appendChild(b);
+    el.appendChild(document.createTextNode(' ' + text));
+    if (mono !== undefined) {
+      const m = document.createElement('span');
+      m.className = 'mono';
+      m.textContent = mono;
+      el.appendChild(m);
+    }
+  }
+
+  function addLine(boxId) {
+    const el = document.createElement('div');
+    document.getElementById(boxId).appendChild(el);
+    return el;
+  }
+
+  // Fixed slots, so the lines keep their order while the tests finish at different times.
+  const L = {
+    secure: addLine('results'),
+    reload: addLine('results'),
+    crypto: addLine('results'),
+    store: addLine('results'),
+    mqtt: addLine('results'),
+    relays: RELAYS.map(() => addLine('results')),
+    action: addLine('action'),
+    match: addLine('address'),
+    hash: addLine('address'),
+    href: addLine('address'),
+    ua: addLine('browser')
+  };
+
+  // ---- the address and the browser ----
+
+  const secure = window.isSecureContext;
+  if (secure === true) setLine(L.secure, 'ok', 'secure context: isSecureContext is true');
+  else if (secure === false) setLine(L.secure, 'fail', 'secure context: isSecureContext is false, so WebCrypto is off');
+  else setLine(L.secure, 'info', 'secure context: unknown, this browser has no isSecureContext');
+
+  const hash = location.hash;
+  if (hash === '') {
+    setLine(L.match, 'info', 'no # part in the address: scan spike/qr.html to test a full-length one');
+  } else if (hash === QR_HASH) {
+    setLine(L.match, 'ok', '# part matches the qr.html test code exactly (' + hash.length + ' characters)');
+  } else {
+    setLine(L.match, 'fail', '# part differs from the qr.html test code at character ' +
+      (firstDiff(hash, QR_HASH) + 1) + ' (' + hash.length + ' characters here, ' + QR_HASH.length + ' expected)');
+  }
+  setLine(L.hash, 'info', 'location.hash, ' + hash.length + ' characters:', hash === '' ? '(empty)' : hash);
+  setLine(L.href, 'info', 'location.href, ' + location.href.length + ' characters:', location.href);
+
+  const ua = navigator.userAgent;
+  setLine(L.ua, 'info', 'inside WeChat: ' + (/MicroMessenger/i.test(ua) ? 'yes' : 'no') + '. navigator.userAgent:', ua);
+
+  // ---- WebCrypto: does the key stored by the last load still open its message? ----
+
+  async function checkStoredKey() {
+    let keyText, msgText;
+    try {
+      keyText = localStorage.getItem(STORE_KEY);
+      msgText = localStorage.getItem(STORE_MSG);
+    } catch (e) {
+      setLine(L.reload, 'fail', 'key survived reload: FAIL, localStorage cannot be read (' + errText(e) + ')');
+      return;
+    }
+    if (keyText === null && msgText === null) {
+      setLine(L.reload, 'info', 'key survived reload: not tested yet, nothing was stored before this load. Press Reload page.');
+      return;
+    }
+    if (keyText === null || msgText === null) {
+      setLine(L.reload, 'fail', 'key survived reload: FAIL, storage kept the ' +
+        (keyText === null ? 'sealed message but not the key' : 'key but not the sealed message'));
+      return;
+    }
+    try {
+      const key = await importAes(keyText);
+      const note = await unseal(key, CRYPTO_TOPIC, msgText);
+      if (note && note.test === 'spike') {
+        const age = typeof note.at === 'number'
+          ? ', sealed ' + Math.max(0, Math.round((Date.now() - note.at) / 1000)) + ' s ago' : '';
+        setLine(L.reload, 'ok', 'key survived reload: OK (the stored key opened the stored message' + age + ')');
+      } else {
+        setLine(L.reload, 'fail', 'key survived reload: FAIL, the stored key did not open the stored message');
+      }
+    } catch (e) {
+      setLine(L.reload, 'fail', 'key survived reload: FAIL, ' + errText(e));
+    }
+  }
+
+  // ---- WebCrypto: a fresh key agreement, then store the key and a sealed message ----
+
+  async function freshCryptoTest() {
+    let keyText, sealed;
+    try {
+      const sideA = await newKeyPair();
+      const sideB = await newKeyPair();
+      const keyA = await deriveShared(sideA, await exportPub(sideB));
+      const keyB = await deriveShared(sideB, await exportPub(sideA));
+      const note = { test: 'spike', nonce: randHex(8), at: Date.now() };
+      sealed = await seal(keyA, CRYPTO_TOPIC, note);
+      const opened = await unseal(keyB, CRYPTO_TOPIC, sealed);
+      if (JSON.stringify(opened) !== JSON.stringify(note)) {
+        setLine(L.crypto, 'fail', 'crypto: FAIL, a message sealed by side A did not open on side B');
+        setLine(L.store, 'fail', 'storage: nothing stored, because the crypto test failed');
+        return;
+      }
+      keyText = await exportAes(keyA);
+      setLine(L.crypto, 'ok', 'crypto: ECDH P-256 sides A and B derived one AES-GCM key; A sealed, B opened');
+    } catch (e) {
+      setLine(L.crypto, 'fail', 'crypto: FAIL, ' + errText(e));
+      setLine(L.store, 'fail', 'storage: nothing stored, because the crypto test failed');
+      return;
+    }
+    try {
+      localStorage.setItem(STORE_KEY, keyText);
+      localStorage.setItem(STORE_MSG, sealed);
+      if (localStorage.getItem(STORE_KEY) === keyText && localStorage.getItem(STORE_MSG) === sealed) {
+        setLine(L.store, 'ok', 'storage: key and sealed message saved. Press Reload page to test them.');
+      } else {
+        setLine(L.store, 'fail', 'storage: FAIL, localStorage did not keep the values');
+      }
+    } catch (e) {
+      setLine(L.store, 'fail', 'storage: FAIL, localStorage cannot be written (' + errText(e) + ')');
+    }
+  }
+
+  if (window.crypto && window.crypto.subtle) {
+    setLine(L.reload, 'wait', 'key survived reload: checking ...');
+    setLine(L.crypto, 'wait', 'crypto: waiting ...');
+    setLine(L.store, 'wait', 'storage: waiting ...');
+    checkStoredKey()
+      .then(freshCryptoTest)
+      .catch(e => spikeShowError('crypto test: ' + errText(e)));
+  } else {
+    const why = 'WebCrypto is missing (crypto.subtle is undefined), so this page is not in a secure context';
+    setLine(L.reload, 'fail', 'key survived reload: not tested. ' + why);
+    setLine(L.crypto, 'fail', 'crypto: not tested. ' + why);
+    setLine(L.store, 'fail', 'storage: not tested. ' + why);
+  }
+
+  // ---- mqtt.js and the relays ----
+
+  function relayName(url) {
+    return url.replace(/^wss:\/\//, '');
+  }
+
+  // Connect, subscribe to a random topic, publish a random payload there, wait for it to come back.
+  function testRelay(lib, url) {
+    return new Promise(resolve => {
+      const topic = 'sim1/spike/' + randHex(6);
+      const payload = 'spike-' + randHex(12);
+      const started = Date.now();
+      let client = null;
+      let connectedMs = -1;
+      let sentAt = 0;
+      let done = false;
+      let timer = null;
+
+      function finish(ok, text) {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        try { if (client) client.end(true); } catch (e) { /* already closed */ }
+        resolve({ ok: ok, text: text });
+      }
+
+      try {
+        client = lib.connect(url, { connectTimeout: 8000, reconnectPeriod: 0, clean: true });
+      } catch (e) {
+        finish(false, 'failed, ' + errText(e));
+        return;
+      }
+      // Backstop, in case the library never reports its own connect timeout.
+      timer = setTimeout(() => finish(false, 'timed out, no connection after 10 s'), 10000);
+
+      client.on('connect', () => {
+        connectedMs = Date.now() - started;
+        clearTimeout(timer);
+        timer = setTimeout(() => finish(false, 'timed out, connected in ' + connectedMs +
+          ' ms but the message did not come back within ' + (ECHO_WAIT_MS / 1000) + ' s'), ECHO_WAIT_MS);
+        client.subscribe(topic, { qos: 0 }, (err, granted) => {
+          if (err) return finish(false, 'failed, subscribe error: ' + errText(err));
+          if (granted && granted[0] && granted[0].qos === 128) return finish(false, 'failed, the relay refused the subscription');
+          sentAt = Date.now();
+          client.publish(topic, payload, { qos: 0 }, err2 => {
+            if (err2) finish(false, 'failed, publish error: ' + errText(err2));
+          });
+        });
+      });
+      client.on('message', (t, body) => {
+        if (t === topic && String(body) === payload) {
+          finish(true, 'round-trip OK in ' + (Date.now() - sentAt) + ' ms (connected in ' + connectedMs + ' ms)');
+        }
+      });
+      client.on('error', err => {
+        const text = errText(err);
+        finish(false, (/timeout/i.test(text) ? 'timed out, ' : 'failed, ') + text);
+      });
+      client.on('close', () => {
+        finish(false, connectedMs < 0 ? 'failed, the connection closed before it opened'
+                                      : 'failed, the connection closed before the message came back');
+      });
+    });
+  }
+
+  async function relayTests() {
+    const label = i => 'relay ' + (i + 1) + ' ' + relayName(RELAYS[i]) + ': ';
+    RELAYS.forEach((url, i) => setLine(L.relays[i], 'wait', label(i) + 'waiting for mqtt.js'));
+    setLine(L.mqtt, 'wait', 'mqtt.js: loading ...');
+    const t0 = Date.now();
+    let src;
+    try {
+      src = await loadScript(MQTT_URLS);
+    } catch (e) {
+      setLine(L.mqtt, 'fail', 'mqtt.js did not load from either address (' + errText(e) + ')');
+      RELAYS.forEach((url, i) => setLine(L.relays[i], 'fail', label(i) + 'not tested, mqtt.js did not load'));
+      return;
+    }
+    const m = window.mqtt;
+    const lib = m && typeof m.connect === 'function' ? m
+      : m && m.default && typeof m.default.connect === 'function' ? m.default : null;
+    if (!lib) {
+      setLine(L.mqtt, 'fail', 'mqtt.js: a script loaded, but mqtt.connect is missing:', src);
+      RELAYS.forEach((url, i) => setLine(L.relays[i], 'fail', label(i) + 'not tested, mqtt.connect is missing'));
+      return;
+    }
+    setLine(L.mqtt, 'ok', 'mqtt.js loaded from address ' + (MQTT_URLS.indexOf(src) + 1) + ' of ' +
+      MQTT_URLS.length + ' in ' + (Date.now() - t0) + ' ms:', src);
+    RELAYS.forEach((url, i) => setLine(L.relays[i], 'wait', label(i) + 'waiting for its turn'));
+    for (let i = 0; i < RELAYS.length; i++) {
+      setLine(L.relays[i], 'wait', label(i) + 'testing ...');
+      const r = await testRelay(lib, RELAYS[i]);
+      setLine(L.relays[i], r.ok ? 'ok' : 'fail', label(i) + r.text);
+    }
+  }
+
+  relayTests().catch(e => spikeShowError('relay test: ' + errText(e)));
+
+  // ---- buttons ----
+
+  document.getElementById('reload').addEventListener('click', () => location.reload());
+  document.getElementById('clear').addEventListener('click', () => {
+    try {
+      localStorage.removeItem(STORE_KEY);
+      localStorage.removeItem(STORE_MSG);
+      setLine(L.action, 'ok', 'stored key cleared. The next load will say "not tested yet".');
+    } catch (e) {
+      setLine(L.action, 'fail', 'could not clear the stored key (' + errText(e) + ')');
+    }
+  });
+})();
+</script>
